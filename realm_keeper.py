@@ -55,28 +55,73 @@ config: Dict[int, GuildConfig] = {}
 
 RESERVED_NAMES = {'sync', 'setup', 'addkey', 'addkeys', 'removekey', 'removekeys', 'clearkeys', 'keys', 'grimoire'}
 
-class InteractionBucket(commands.BucketType):
-    @staticmethod
-    def get_key(interaction: discord.Interaction) -> int:
+class InteractionBucket:
+    def get_key(self, interaction: discord.Interaction) -> int:
         return interaction.user.id
 
 class CustomCooldown:
     def __init__(self, rate: int, per: float):
         self.cooldown = Cooldown(rate, per)
-        self._cooldowns: Dict[int, float] = {}
+        # Use nested dict for per-guild cooldowns: {guild_id: {user_id: expiry}}
+        self._cooldowns: Dict[int, Dict[int, float]] = defaultdict(dict)
+        self._bucket = InteractionBucket()
+        self._last_cleanup = time.time()
+        self.cleanup_interval = 3600  # Cleanup every hour
+    
+    def _cleanup_expired(self, now: float):
+        """Remove expired cooldowns periodically"""
+        if now - self._last_cleanup < self.cleanup_interval:
+            return
+            
+        for guild_id in list(self._cooldowns.keys()):
+            guild_cooldowns = self._cooldowns[guild_id]
+            # Remove expired user cooldowns
+            expired = [
+                user_id for user_id, expiry in guild_cooldowns.items()
+                if now >= expiry
+            ]
+            for user_id in expired:
+                del guild_cooldowns[user_id]
+            # Remove empty guild entries
+            if not guild_cooldowns:
+                del self._cooldowns[guild_id]
+                
+        self._last_cleanup = now
     
     def get_retry_after(self, interaction: discord.Interaction) -> Optional[float]:
+        # Skip cooldown for admins
+        if interaction.user.guild_permissions.administrator:
+            return None
+            
         now = time.time()
-        key = InteractionBucket.get_key(interaction)
+        self._cleanup_expired(now)
         
-        if key in self._cooldowns:
-            if now < self._cooldowns[key]:
-                return self._cooldowns[key] - now
+        guild_id = interaction.guild.id
+        user_id = self._bucket.get_key(interaction)
+        
+        guild_cooldowns = self._cooldowns[guild_id]
+        if user_id in guild_cooldowns:
+            if now < guild_cooldowns[user_id]:
+                return guild_cooldowns[user_id] - now
             else:
-                del self._cooldowns[key]
+                del guild_cooldowns[user_id]
         
-        self._cooldowns[key] = now + self.cooldown.per
+        guild_cooldowns[user_id] = now + self.cooldown.per
         return None
+    
+    def reset_cooldown(self, interaction: discord.Interaction):
+        """Reset cooldown for a user in a guild"""
+        guild_id = interaction.guild.id
+        user_id = self._bucket.get_key(interaction)
+        if guild_id in self._cooldowns:
+            self._cooldowns[guild_id].pop(user_id, None)
+            
+    def get_cooldowns_for_guild(self, guild_id: int) -> int:
+        """Get number of active cooldowns for a guild"""
+        now = time.time()
+        if guild_id not in self._cooldowns:
+            return 0
+        return sum(1 for expiry in self._cooldowns[guild_id].values() if now < expiry)
 
 # Replace the old cooldown with our new one
 claim_cooldown = CustomCooldown(1, 300)  # 1 attempt per 300 seconds (5 minutes)
@@ -631,7 +676,7 @@ async def create_dynamic_command(name: str, guild_id: int):
 
 async def process_claim(interaction: discord.Interaction, key: str):
     try:
-        # Check cooldown first
+        # Check cooldown first (admins are exempt)
         if retry_after := claim_cooldown.get_retry_after(interaction):
             raise commands.CommandOnCooldown(None, retry_after, BucketType.user)
 
@@ -669,6 +714,9 @@ async def process_claim(interaction: discord.Interaction, key: str):
             guild_config.valid_keys.remove(valid_hash)
             await save_config()
             await audit.log_claim(interaction, key[:3], success=True)
+            
+            # Reset cooldown on successful claim
+            claim_cooldown.reset_cooldown(interaction)
             
             # Get random success message
             template = random.choice(guild_config.success_msgs)
