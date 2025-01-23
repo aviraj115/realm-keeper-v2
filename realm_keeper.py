@@ -356,6 +356,23 @@ def require_setup():
         return wrapper  # Return wrapper instead of decorator
     return decorator
 
+# Command descriptions
+ADMIN_COMMANDS = {
+    "setup": "⚙️ Initial server setup and configuration",
+    "addkey": "🔑 Add a single key",
+    "addkeys": "📥 Bulk add multiple keys",
+    "removekey": "🗑️ Remove a single key",
+    "removekeys": "📤 Bulk remove multiple keys",
+    "clearkeys": "💣 Clear all keys",
+    "keys": "📊 Check available keys",
+    "sync": "♻️ Sync bot commands"
+}
+
+MEMBER_COMMANDS = {
+    # This will be dynamically added based on server config
+    # "openportal": "🌀 Use your key to unlock the role"
+}
+
 # Commands
 @bot.tree.command(name="sync", description="♻️ Sync commands (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -562,6 +579,32 @@ async def process_claim(interaction: discord.Interaction, key: str):
         
     except Exception as e:
         await handle_claim_error(interaction, e)
+
+async def handle_claim_error(interaction: discord.Interaction, error: Exception):
+    error_messages = {
+        ValueError: {
+            "Server not configured": "🕳️ The sacred portal is not yet opened!",
+            "Invalid key": "✨ These runes hold no power here!",
+            "Role not found": "🌌 The mystical role has vanished!"
+        },
+        PermissionError: "⚡ The cosmic forces deny my power! (Need higher role)",
+        commands.CommandOnCooldown: lambda e: f"⏳ The time vortex slows you - try again in {e.retry_after:.1f}s"
+    }
+    
+    # Get error message
+    if type(error) in error_messages:
+        message = error_messages[type(error)]
+        if isinstance(message, dict):
+            message = message.get(str(error), "🌌 Unknown mystical disturbance!")
+        if callable(message):
+            message = message(error)
+    else:
+        message = "🌌 A cosmic disturbance prevents this action!"
+    
+    try:
+        await interaction.response.send_message(message, ephemeral=True)
+    except discord.InteractionResponded:
+        await interaction.followup.send(message, ephemeral=True)
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
