@@ -78,7 +78,7 @@ async def load_config():
                     cfg.get("command", "claim"),
                     cfg.get("success_msg", "{user} has unlocked the {role}!")
                 )
-                for guild_id, cfg in data["guilds"].items()
+                for guild_id, cfg in data.items()  # Removed ["guilds"]
             }
     except FileNotFoundError:
         config = {}
@@ -185,6 +185,13 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
         style=discord.TextStyle.long,
         required=False
     )
+    
+    initial_keys = discord.ui.TextInput(
+        label="Initial Keys (one per line, optional)",
+        style=discord.TextStyle.long,
+        placeholder="key1\nkey2\nkey3",
+        required=False
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -219,10 +226,15 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             # Use random default message if none provided
             success_template = str(self.success_message) if self.success_message.value else random.choice(DEFAULT_SUCCESS_MESSAGES)
             
+            # Parse initial keys if provided
+            initial_key_set = set()
+            if self.initial_keys.value:
+                initial_key_set = {k.strip() for k in self.initial_keys.value.split("\n") if k.strip()}
+            
             # Store configuration
             config[guild_id] = GuildConfig(
                 roles[0].id,
-                set(),
+                initial_key_set,  # Use the initial keys
                 command,
                 success_template
             )
@@ -234,7 +246,8 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             await interaction.response.send_message(
                 f"🔮 Configuration complete!\n"
                 f"- Activation command: `/{command}`\n"
-                f"- Success template: `{success_template}`",
+                f"- Success template: `{success_template}`\n"
+                f"- Initial keys added: {len(initial_key_set)}",
                 ephemeral=True
             )
         except Exception as e:
@@ -254,21 +267,21 @@ class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id
-        if guild_id not in config:
+        if (guild_config := config.get(guild_id)) is None:
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
 
         key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
-        existing = config[guild_id].valid_keys
+        existing = guild_config.valid_keys
         new_keys = [k for k in key_list if k not in existing]
         
-        config[guild_id].valid_keys.update(new_keys)
+        guild_config.valid_keys.update(new_keys)
         await save_config()
 
         await interaction.response.send_message(
             f"✅ Added {len(new_keys)} new keys!\n"
             f"• Duplicates skipped: {len(key_list)-len(new_keys)}\n"
-            f"• Total keys: {len(config[guild_id].valid_keys)}",
+            f"• Total keys: {len(guild_config.valid_keys)}",
             ephemeral=True
         )
 
@@ -282,12 +295,11 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Keys"):
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id
-        if guild_id not in config:
+        if (guild_config := config.get(guild_id)) is None:
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
 
         key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
-        guild_config = config[guild_id]
         
         removed = sum(1 for k in key_list if k in guild_config.valid_keys)
         guild_config.valid_keys -= set(key_list)
@@ -315,6 +327,17 @@ class ArcaneGatewayModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await process_claim(interaction, str(self.key))
 
+# Add this helper
+def require_setup():
+    def decorator(func):
+        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            if (guild_config := config.get(interaction.guild.id)) is None:
+                await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+                return
+            return await func(interaction, guild_config, *args, **kwargs)
+        return wrapper
+    return decorator
+
 # Commands
 @bot.tree.command(name="sync", description="♻️ Sync commands (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -341,15 +364,15 @@ async def setup(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def addkey(interaction: discord.Interaction, key: str):
     guild_id = interaction.guild.id
-    if guild_id not in config:
+    if (guild_config := config.get(guild_id)) is None:
         await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
         return
 
-    if key in config[guild_id].valid_keys:
+    if key in guild_config.valid_keys:
         await interaction.response.send_message("❌ Key exists!", ephemeral=True)
         return
 
-    config[guild_id].valid_keys.add(key)
+    guild_config.valid_keys.add(key)
     await save_config()
     await interaction.response.send_message("✅ Key added!", ephemeral=True)
 
@@ -362,15 +385,15 @@ async def addkeys(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def removekey(interaction: discord.Interaction, key: str):
     guild_id = interaction.guild.id
-    if guild_id not in config:
+    if (guild_config := config.get(guild_id)) is None:
         await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
         return
 
-    if key not in config[guild_id].valid_keys:
+    if key not in guild_config.valid_keys:
         await interaction.response.send_message("❌ Key not found!", ephemeral=True)
         return
 
-    config[guild_id].valid_keys.discard(key)
+    guild_config.valid_keys.discard(key)
     await save_config()
     await interaction.response.send_message("✅ Key removed!", ephemeral=True)
 
@@ -383,7 +406,7 @@ async def removekeys(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def clearkeys(interaction: discord.Interaction):
     guild_id = interaction.guild.id
-    if guild_id not in config:
+    if (guild_config := config.get(guild_id)) is None:
         await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
         return
 
@@ -396,7 +419,7 @@ async def clearkeys(interaction: discord.Interaction):
             if button_interaction.user != interaction.user:
                 return
                 
-            config[guild_id].valid_keys.clear()
+            guild_config.valid_keys.clear()
             await save_config()
             await button_interaction.response.edit_message(
                 content="✅ All keys cleared!",
@@ -411,15 +434,9 @@ async def clearkeys(interaction: discord.Interaction):
 
 @bot.tree.command(name="keys", description="Check available keys (Admin only)")
 @app_commands.default_permissions(administrator=True)
-async def keys(interaction: discord.Interaction):
-    guild_id = interaction.guild.id
-    if guild_id not in config:
-        await interaction.response.send_message("❌ Server not setup!", ephemeral=True)
-        return
-    
-    guild_config = config[guild_id]
+@require_setup()
+async def keys(interaction: discord.Interaction, guild_config: GuildConfig):
     role = interaction.guild.get_role(guild_config.role_id)
-    
     await interaction.response.send_message(
         f"🔑 **Key Status**\n"
         f"• Available keys: {len(guild_config.valid_keys)}\n"
@@ -427,99 +444,69 @@ async def keys(interaction: discord.Interaction):
         ephemeral=True
     )
 
-class ClaimSystem:
-    _cooldown = commands.CooldownMapping.from_cooldown(1, 60, commands.BucketType.user)
-    
-    @staticmethod
-    def is_valid_key(key: str) -> bool:
-        try:
-            return uuid.UUID(key).version == 4
-        except ValueError:
-            return False
-
-async def process_claim(interaction: discord.Interaction, key: str):
+@bot.tree.command(name="grimoire", description="📚 Reveal the ancient tomes of knowledge")
+async def grimoire(interaction: discord.Interaction):
+    is_admin = interaction.user.guild_permissions.administrator
     guild_id = interaction.guild.id
     
-    try:
-        if (guild_config := config.get(guild_id)) is None:
-            raise ValueError("Server not configured")
-            
-        if key not in guild_config.valid_keys:
-            raise ValueError("Invalid key")
-            
-        role = interaction.guild.get_role(guild_config.role_id)
-        if not role:
-            raise ValueError("Role not found")
-            
-        if role >= interaction.guild.me.top_role:
-            raise PermissionError("Bot role too low")
-            
-        # Process claim
-        await interaction.user.add_roles(role)
-        guild_config.valid_keys.remove(key)
-        await save_config()
-        
-        # Get custom message template
-        template = guild_config.success_msg
-        formatted = template.format(
-            user=interaction.user.mention,
-            role=role.mention,
-            key=f"`{key}`"
+    embed = discord.Embed(
+        title="🔮 Realm Keeper Commands",
+        color=discord.Color.blurple()
+    )
+    
+    if is_admin:
+        admin_cmds = "\n".join(f"• `/{cmd}` - {desc}" for cmd, desc in ADMIN_COMMANDS.items())
+        embed.add_field(
+            name="🛡️ Admin Commands",
+            value=admin_cmds,
+            inline=False
         )
-        
-        await interaction.response.send_message(
-            f"✨ {formatted} ✨",
-            ephemeral=True
+    
+    # Show member commands (including custom command if configured)
+    member_cmds = MEMBER_COMMANDS.copy()
+    if guild_id in config:
+        custom_cmd = config[guild_id].command
+        member_cmds[custom_cmd] = "🌀 Use your key to unlock the role"
+    
+    if member_cmds:
+        member_list = "\n".join(f"• `/{cmd}` - {desc}" for cmd, desc in member_cmds.items())
+        embed.add_field(
+            name="📜 Member Commands",
+            value=member_list,
+            inline=False
         )
-        
-    except Exception as e:
-        await handle_claim_error(interaction, e)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    logging.error(f"Error in {event}: {args} {kwargs}")
+
+@bot.event
+async def on_command_error(ctx, error):
+    logging.error(f"Command error: {error}")
 
 async def create_dynamic_command(name: str, guild_id: int):
     try:
-        # Remove old command if it exists
-        old_command = bot.tree.get_command("claim", guild=discord.Object(id=guild_id))
-        if old_command:
-            bot.tree.remove_command("claim", guild=discord.Object(id=guild_id))
-            logging.info(f"Removed old claim command for guild {guild_id}")
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            raise ValueError(f"Guild {guild_id} not found")
 
-        # Create new guild-specific command
-        @bot.tree.command(name=name, description="Unlock your mystical powers", guild=discord.Object(id=guild_id))
-        async def dynamic_claim(interaction: discord.Interaction):  # Remove key parameter
-            # Show the modal instead
+        # Remove existing command if it exists
+        old_command = bot.tree.get_command(name, guild=discord.Object(id=guild_id))
+        if old_command:
+            bot.tree.remove_command(name, guild=discord.Object(id=guild_id))
+            
+        @bot.tree.command(name=name, description="🌟 Unlock your mystical powers", guild=discord.Object(id=guild_id))
+        async def dynamic_claim(interaction: discord.Interaction):
             await interaction.response.send_modal(ArcaneGatewayModal())
             
-        # Sync only to this guild
         await bot.tree.sync(guild=discord.Object(id=guild_id))
         logging.info(f"Created command /{name} for guild {guild_id}")
         
     except Exception as e:
         logging.error(f"Failed to create command /{name}: {e}")
         raise
-
-async def handle_claim_error(interaction: discord.Interaction, error: Exception):
-    error_messages = {
-        ValueError: {
-            "Invalid key format": "🌀 The ancient runes reject your offering!",
-            "Server not configured": "🕳️ The sacred portal is not yet opened!",
-            "Invalid key": "✨ These runes hold no power here!",
-            "Role not found": "🌌 The mystical role has vanished!"
-        },
-        PermissionError: "⚡ The cosmic forces deny my power! (Need higher role)",
-        commands.CommandOnCooldown: lambda e: f"⏳ The time vortex slows you - try again in {e.retry_after:.1f}s"
-    }
-    
-    # Get error message
-    if type(error) in error_messages:
-        message = error_messages[type(error)]
-        if isinstance(message, dict):
-            message = message.get(str(error), "🌌 Unknown mystical disturbance!")
-        if callable(message):
-            message = message(error)
-    else:
-        message = "🌌 A cosmic disturbance prevents this action!"
-    
-    await interaction.response.send_message(message, ephemeral=True)
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
