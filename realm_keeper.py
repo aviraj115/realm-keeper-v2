@@ -330,11 +330,11 @@ class ArcaneGatewayModal(discord.ui.Modal):
 # Add this helper
 def require_setup():
     def decorator(func):
-        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+        async def wrapper(interaction: discord.Interaction):
             if (guild_config := config.get(interaction.guild.id)) is None:
                 await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
                 return
-            return await func(interaction, guild_config, *args, **kwargs)
+            return await func(interaction, guild_config)
         return wrapper
     return decorator
 
@@ -435,7 +435,8 @@ async def clearkeys(interaction: discord.Interaction):
 @bot.tree.command(name="keys", description="Check available keys (Admin only)")
 @app_commands.default_permissions(administrator=True)
 @require_setup()
-async def keys(interaction: discord.Interaction, guild_config: GuildConfig):
+async def keys(interaction: discord.Interaction):
+    guild_config = config[interaction.guild.id]
     role = interaction.guild.get_role(guild_config.role_id)
     await interaction.response.send_message(
         f"🔑 **Key Status**\n"
