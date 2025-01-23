@@ -240,21 +240,38 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             )
             await save_config()
             
-            # Create guild-specific command
+            # Create guild-specific command first
             await create_dynamic_command(command, guild_id)
             
-            await interaction.response.send_message(
-                f"🔮 Configuration complete!\n"
-                f"- Activation command: `/{command}`\n"
-                f"- Success template: `{success_template}`\n"
-                f"- Initial keys added: {len(initial_key_set)}",
-                ephemeral=True
-            )
+            try:
+                await interaction.response.send_message(
+                    f"🔮 Configuration complete!\n"
+                    f"- Activation command: `/{command}`\n"
+                    f"- Success template: `{success_template}`\n"
+                    f"- Initial keys added: {len(initial_key_set)}",
+                    ephemeral=True
+                )
+            except discord.NotFound:  # Handle interaction timeout
+                # Try to send a followup if original response fails
+                await interaction.followup.send(
+                    f"🔮 Configuration complete!\n"
+                    f"- Activation command: `/{command}`\n"
+                    f"- Success template: `{success_template}`\n"
+                    f"- Initial keys added: {len(initial_key_set)}",
+                    ephemeral=True
+                )
+            
         except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Setup failed: {str(e)}",
-                ephemeral=True
-            )
+            try:
+                await interaction.response.send_message(
+                    f"❌ Setup failed: {str(e)}",
+                    ephemeral=True
+                )
+            except discord.NotFound:
+                await interaction.followup.send(
+                    f"❌ Setup failed: {str(e)}",
+                    ephemeral=True
+                )
 
 class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
     keys = discord.ui.TextInput(
@@ -336,7 +353,7 @@ def require_setup():
                 return
             # Don't pass guild_config, let the function get it if needed
             return await func(interaction)  # Remove guild_config parameter
-        return wrapper
+        return decorator
     return decorator
 
 # Commands
