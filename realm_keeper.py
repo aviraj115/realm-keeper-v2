@@ -13,6 +13,7 @@ import random
 from discord.ext.commands import Cooldown, BucketType
 from collections import defaultdict
 from threading import Lock
+import asyncio
 from cryptography.fernet import Fernet
 import base64
 from passlib.hash import bcrypt_sha256
@@ -126,7 +127,7 @@ class CustomCooldown:
 # Replace the old cooldown with our new one
 claim_cooldown = CustomCooldown(1, 300)  # 1 attempt per 300 seconds (5 minutes)
 
-key_locks: Dict[int, Lock] = defaultdict(Lock)
+key_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 async def save_config():
     async with aiofiles.open('config.json', 'w') as f:
@@ -440,18 +441,40 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Keys"):
 
 class ArcaneGatewayModal(discord.ui.Modal):
     def __init__(self):
-        # Get custom title from config if available
         super().__init__(title="🔮 Arcane Gateway")
         
     key = discord.ui.TextInput(
-        label="Speak the Ancient Rune",
+        label="SPEAK THE ANCIENT RUNE",
         placeholder="Enter your mystical key...",
         style=discord.TextStyle.short,
-        required=True
+        required=True,
+        min_length=1,
+        max_length=100
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await process_claim(interaction, str(self.key))
+        try:
+            # Defer response to prevent timeouts
+            await interaction.response.defer(ephemeral=True)
+            
+            # Clean the key input
+            key = str(self.key).strip()
+            if not key:
+                await interaction.followup.send("❌ Invalid key format!", ephemeral=True)
+                return
+                
+            # Process the claim
+            await process_claim(interaction, key)
+            
+        except Exception as e:
+            try:
+                await interaction.followup.send(
+                    "❌ Something went wrong. Please try again later.",
+                    ephemeral=True
+                )
+                logging.error(f"Claim error: {str(e)}", exc_info=True)
+            except Exception:
+                pass
 
 # Add this helper
 def require_setup():
@@ -685,7 +708,7 @@ async def process_claim(interaction: discord.Interaction, key: str):
             
         # Thread-safe key operations
         guild_id = interaction.guild.id
-        with key_locks[guild_id]:
+        async with key_locks[guild_id]:
             # Check if user already has the role
             role = interaction.guild.get_role(guild_config.role_id)
             if not role:
