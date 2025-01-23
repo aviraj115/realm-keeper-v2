@@ -509,6 +509,42 @@ async def create_dynamic_command(name: str, guild_id: int):
         logging.error(f"Failed to create command /{name}: {e}")
         raise
 
+async def process_claim(interaction: discord.Interaction, key: str):
+    try:
+        if (guild_config := config.get(interaction.guild.id)) is None:
+            raise ValueError("Server not configured")
+            
+        if key not in guild_config.valid_keys:
+            raise ValueError("Invalid key")
+            
+        role = interaction.guild.get_role(guild_config.role_id)
+        if not role:
+            raise ValueError("Role not found")
+            
+        if role >= interaction.guild.me.top_role:
+            raise PermissionError("Bot role too low")
+            
+        # Process claim
+        await interaction.user.add_roles(role)
+        guild_config.valid_keys.remove(key)
+        await save_config()
+        
+        # Get custom message template
+        template = guild_config.success_msg
+        formatted = template.format(
+            user=interaction.user.mention,
+            role=role.mention,
+            key=f"`{key}`"
+        )
+        
+        await interaction.response.send_message(
+            f"✨ {formatted} ✨",
+            ephemeral=True
+        )
+        
+    except Exception as e:
+        await handle_claim_error(interaction, e)
+
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
