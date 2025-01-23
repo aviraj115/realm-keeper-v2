@@ -18,11 +18,16 @@ Keeper of your keys and channels!
    ```
 
 ## Commands
+### Admin Commands
 - `/setup` - Initial server setup (Admin only)
 - `/addkey` - Add a single key (Admin only)
 - `/addkeys` - Bulk add keys (Admin only)
 - `/removekey` - Remove a single key (Admin only)
 - `/removekeys` - Bulk remove keys (Admin only)
 - `/clearkeys` - Clear all keys (Admin only)
-- `/claim` - Claim a role with a valid key
 - `/keys` - Check number of available keys (Admin only)
+- `/sync` - Sync bot commands (Admin only)
+- `/grimoire` - Reveal the ancient tomes of knowledge
+
+### Member Commands
+- Custom command (configured during setup) - Claim your role
