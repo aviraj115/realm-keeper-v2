@@ -316,7 +316,7 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             # Update progress
             await progress_msg.edit(content="🔍 Validating role...")
             
-            # Find role
+            # Find role and check hierarchy
             roles = [r for r in interaction.guild.roles if r.name == role_name]
             if len(roles) > 1:
                 await progress_msg.edit(content="❌ Multiple roles with this name exist!")
@@ -325,7 +325,26 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             if not roles:
                 await progress_msg.edit(content="❌ Role not found! Create it first.")
                 return
-
+                
+            target_role = roles[0]
+            bot_role = interaction.guild.me.top_role
+            
+            # Check bot's role position
+            if target_role >= bot_role:
+                await progress_msg.edit(
+                    content="❌ Bot's role must be higher than the target role!\n"
+                    f"• Bot's highest role: {bot_role.mention}\n"
+                    f"• Target role: {target_role.mention}"
+                )
+                return
+                
+            # Check admin's role position
+            if not interaction.user.guild_permissions.administrator and target_role >= interaction.user.top_role:
+                await progress_msg.edit(
+                    content="❌ Your highest role must be above the target role!"
+                )
+                return
+            
             # Update progress
             await progress_msg.edit(content="📝 Processing configuration...")
 
@@ -344,7 +363,7 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             
             # Store configuration
             config[guild_id] = GuildConfig(
-                roles[0].id,
+                target_role.id,
                 initial_key_set,
                 command,
                 success_msgs
@@ -454,24 +473,95 @@ class ArcaneGatewayModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Defer response to prevent timeouts
+            # Defer response immediately
             await interaction.response.defer(ephemeral=True)
+            
+            # Show initial status
+            progress_msg = await interaction.followup.send(
+                "🔮 Channeling mystical energies...",
+                ephemeral=True,
+                wait=True
+            )
             
             # Clean the key input
             key = str(self.key).strip()
             if not key:
-                await interaction.followup.send("❌ Invalid key format!", ephemeral=True)
+                await progress_msg.edit(content="❌ Invalid key format!")
+                return
+            
+            # Check cooldown first
+            if retry_after := claim_cooldown.get_retry_after(interaction):
+                await progress_msg.edit(
+                    content=f"⏳ The portal is still cooling down... Try again in {retry_after:.1f}s"
+                )
                 return
                 
-            # Process the claim
-            await process_claim(interaction, key)
+            # Update progress while verifying
+            await progress_msg.edit(content="✨ Verifying ancient runes...")
             
+            # Process the claim
+            if (guild_config := config.get(interaction.guild.id)) is None:
+                await progress_msg.edit(content="🔧 Server not configured! Use /setup first")
+                return
+                
+            # Thread-safe key operations
+            guild_id = interaction.guild.id
+            async with key_locks[guild_id]:
+                # Check role
+                role = interaction.guild.get_role(guild_config.role_id)
+                if not role:
+                    await progress_msg.edit(content="👻 Role missing - contact admin!")
+                    return
+                    
+                if role >= interaction.guild.me.top_role:
+                    await progress_msg.edit(content="📛 Bot needs higher role position!")
+                    return
+                    
+                if role in interaction.user.roles:
+                    await progress_msg.edit(content="🎭 You already have this role!")
+                    return
+                
+                # Update progress while checking key
+                await progress_msg.edit(content="🔍 Consulting the ancient tomes...")
+                
+                # Verify key
+                valid_hash = None
+                for hash_ in guild_config.valid_keys:
+                    if key_security.verify_key(key, hash_):
+                        valid_hash = hash_
+                        break
+                        
+                if not valid_hash:
+                    await audit.log_claim(interaction, key[:3], success=False)
+                    await progress_msg.edit(content="🔑 Invalid or expired key!")
+                    return
+                    
+                # Update progress while granting role
+                await progress_msg.edit(content="⚡ Channeling powers...")
+                
+                # Process claim
+                await interaction.user.add_roles(role)
+                guild_config.valid_keys.remove(valid_hash)
+                await save_config()
+                await audit.log_claim(interaction, key[:3], success=True)
+                
+                # Reset cooldown on successful claim
+                claim_cooldown.reset_cooldown(interaction)
+                
+                # Get random success message
+                template = random.choice(guild_config.success_msgs)
+                formatted = template.format(
+                    user=interaction.user.mention,
+                    role=role.mention,
+                    key=f"`{key[:3]}...`"
+                )
+                
+                # Final success message
+                await progress_msg.edit(content=f"✨ {formatted} ✨")
+                
         except Exception as e:
             try:
-                await interaction.followup.send(
-                    "❌ Something went wrong. Please try again later.",
-                    ephemeral=True
-                )
+                await progress_msg.edit(content="❌ A mystical disturbance prevents this action!")
                 logging.error(f"Claim error: {str(e)}", exc_info=True)
             except Exception:
                 pass
@@ -497,7 +587,8 @@ ADMIN_COMMANDS = {
     "removekeys": "📤 Bulk remove multiple keys",
     "clearkeys": "💣 Clear all keys",
     "keys": "📊 Check available keys",
-    "sync": "♻️ Sync bot commands"
+    "sync": "♻️ Sync bot commands",
+    "stats": "📊 View realm statistics (Admin only)"
 }
 
 MEMBER_COMMANDS = {
@@ -659,6 +750,71 @@ async def grimoire(interaction: discord.Interaction):
         )
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="stats", description="📊 View realm statistics (Admin only)")
+@app_commands.default_permissions(administrator=True)
+@require_setup()
+async def view_stats(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    guild_stats = stats.get_stats(guild_id)
+    guild_config = config[guild_id]
+    
+    embed = discord.Embed(
+        title="📊 Realm Statistics",
+        color=discord.Color.blue()
+    )
+    
+    # Claims stats
+    claims = (
+        f"• Total attempts: {guild_stats['total_claims']}\n"
+        f"• Successful: {guild_stats['successful_claims']}\n"
+        f"• Failed: {guild_stats['failed_claims']}\n"
+        f"• Success rate: {guild_stats['success_rate']:.1f}%\n"
+        f"• Last claim: {format_time_ago(guild_stats['time_since_last_claim'])}"
+    )
+    embed.add_field(name="🎯 Claims", value=claims, inline=False)
+    
+    # Performance stats
+    if guild_stats['claim_count'] > 0:
+        perf = (
+            f"• Average time: {guild_stats['avg_claim_time']:.1f}s\n"
+            f"• Fastest: {guild_stats['fastest_claim']:.1f}s\n"
+            f"• Slowest: {guild_stats['slowest_claim']:.1f}s"
+        )
+        embed.add_field(name="⚡ Performance", value=perf, inline=False)
+    
+    # Keys stats
+    keys = (
+        f"• Available: {len(guild_config.valid_keys)}\n"
+        f"• Added: {guild_stats['keys_added']}\n"
+        f"• Removed: {guild_stats['keys_removed']}\n"
+        f"• Last added: {format_time_ago(guild_stats['time_since_last_key'])}"
+    )
+    embed.add_field(name="🔑 Keys", value=keys, inline=False)
+    
+    # Active cooldowns
+    cooldowns = claim_cooldown.get_cooldowns_for_guild(guild_id)
+    embed.add_field(
+        name="⏳ Cooldowns",
+        value=f"• Active: {cooldowns}",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+def format_time_ago(seconds: float) -> str:
+    """Format time difference as human readable string"""
+    if not seconds:
+        return "Never"
+        
+    if seconds < 60:
+        return f"{seconds:.0f}s ago"
+    elif seconds < 3600:
+        return f"{seconds/60:.0f}m ago"
+    elif seconds < 86400:
+        return f"{seconds/3600:.0f}h ago"
+    else:
+        return f"{seconds/86400:.0f}d ago"
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -842,6 +998,86 @@ class AuditLogger:
 
 # Initialize logger
 audit = AuditLogger()
+
+# Add after AuditLogger
+class StatsTracker:
+    def __init__(self):
+        self.stats: Dict[int, Dict[str, int]] = defaultdict(lambda: {
+            'total_claims': 0,
+            'successful_claims': 0,
+            'failed_claims': 0,
+            'keys_added': 0,
+            'keys_removed': 0,
+            'last_claim': 0,  # Timestamp of last claim
+            'last_key_add': 0,  # Timestamp of last key addition
+            'fastest_claim': float('inf'),  # Fastest successful claim time
+            'slowest_claim': 0,  # Slowest successful claim time
+            'total_claim_time': 0,  # Total time spent claiming
+            'claim_count': 0  # Number of claims for averaging
+        })
+        self.load_stats()
+    
+    async def save_stats(self):
+        """Save stats to file"""
+        async with aiofiles.open('stats.json', 'w') as f:
+            await f.write(json.dumps({
+                str(guild_id): data 
+                for guild_id, data in self.stats.items()
+            }, indent=4))
+    
+    def load_stats(self):
+        """Load stats from file"""
+        try:
+            with open('stats.json', 'r') as f:
+                data = json.loads(f.read())
+                self.stats.update({
+                    int(guild_id): stats_data
+                    for guild_id, stats_data in data.items()
+                })
+        except FileNotFoundError:
+            pass
+    
+    def log_claim(self, guild_id: int, success: bool, claim_time: float = None):
+        """Log a claim attempt with timing"""
+        now = time.time()
+        guild_stats = self.stats[guild_id]
+        
+        guild_stats['total_claims'] += 1
+        guild_stats['last_claim'] = now
+        
+        if success:
+            guild_stats['successful_claims'] += 1
+            if claim_time:
+                guild_stats['claim_count'] += 1
+                guild_stats['total_claim_time'] += claim_time
+                guild_stats['fastest_claim'] = min(guild_stats['fastest_claim'], claim_time)
+                guild_stats['slowest_claim'] = max(guild_stats['slowest_claim'], claim_time)
+        else:
+            guild_stats['failed_claims'] += 1
+    
+    def log_keys_added(self, guild_id: int, count: int):
+        guild_stats = self.stats[guild_id]
+        guild_stats['keys_added'] += count
+        guild_stats['last_key_add'] = time.time()
+    
+    def get_stats(self, guild_id: int) -> dict:
+        stats = self.stats[guild_id]
+        total_claims = stats['total_claims']
+        
+        # Calculate additional metrics
+        success_rate = (stats['successful_claims'] / total_claims * 100) if total_claims else 0
+        avg_claim_time = (stats['total_claim_time'] / stats['claim_count']) if stats['claim_count'] else 0
+        
+        return {
+            **stats,
+            'success_rate': success_rate,
+            'avg_claim_time': avg_claim_time,
+            'time_since_last_claim': time.time() - stats['last_claim'] if stats['last_claim'] else 0,
+            'time_since_last_key': time.time() - stats['last_key_add'] if stats['last_key_add'] else 0
+        }
+
+# Initialize tracker
+stats = StatsTracker()
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
