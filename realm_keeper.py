@@ -74,10 +74,10 @@ async def load_config():
                 int(guild_id): GuildConfig(
                     cfg["role_id"],
                     set(cfg["valid_keys"]),
-                    cfg["command"],
-                    cfg["success_msg"]
+                    cfg.get("command", "claim"),
+                    cfg.get("success_msg", "{user} has unlocked the {role}!")
                 )
-                for guild_id, cfg in data.items()
+                for guild_id, cfg in data["guilds"].items()
             }
     except FileNotFoundError:
         config = {}
