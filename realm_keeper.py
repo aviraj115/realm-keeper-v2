@@ -144,18 +144,45 @@ async def cleanup_task():
         logging.info(f"Removed {removed} inactive guilds")
 
 # Modals
-class SetupModal(discord.ui.Modal, title="Server Setup"):
+class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     role_name = discord.ui.TextInput(
         label="Role Name (exact match)",
-        placeholder="Realm Tester",
+        placeholder="Realm Traveler",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    
+    command_name = discord.ui.TextInput(
+        label="Activation Command",
+        placeholder="openportal",
+        style=discord.TextStyle.short,
         required=True,
-        max_length=100
+        max_length=20
+    )
+    
+    success_message = discord.ui.TextInput(
+        label="Success Message Template",
+        placeholder="{user} has unlocked the {role}!",
+        style=discord.TextStyle.long,
+        required=True
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        guild_id = interaction.guild.id
-        roles = [r for r in interaction.guild.roles if r.name == str(self.role_name)]
+        guild_id = str(interaction.guild.id)
+        role_name = str(self.role_name)
+        command = str(self.command_name).lower().strip()
+        success_template = str(self.success_message)
         
+        # Validate command name
+        if not command.isalnum():
+            await interaction.response.send_message(
+                "❌ Command name must be alphanumeric!",
+                ephemeral=True
+            )
+            return
+        
+        # Find role
+        roles = [r for r in interaction.guild.roles if r.name == role_name]
         if len(roles) > 1:
             await interaction.response.send_message(
                 "❌ Multiple roles with this name exist!",
@@ -170,11 +197,22 @@ class SetupModal(discord.ui.Modal, title="Server Setup"):
             )
             return
 
-        config[guild_id] = GuildConfig(roles[0].id, set())
+        # Store configuration
+        config[guild_id] = GuildConfig(
+            roles[0].id,
+            set(),
+            command,
+            success_template
+        )
         await save_config()
         
+        # Create dynamic command
+        create_dynamic_command(command)
+        
         await interaction.response.send_message(
-            f"✅ Setup complete! Role set to {roles[0].mention}.",
+            f"🔮 Configuration complete!\n"
+            f"- Activation command: `/{command}`\n"
+            f"- Success template: `{success_template}`",
             ephemeral=True
         )
 
