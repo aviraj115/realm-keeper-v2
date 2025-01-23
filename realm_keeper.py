@@ -281,6 +281,26 @@ async def cleanup_unused_guilds():
             del config["guilds"][guild_id]
     save_config()
 
+@bot.tree.command(name="keys", description="Check number of available keys (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def keys(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    
+    if (guild_config := config["guilds"].get(guild_id)) is None:
+        await interaction.response.send_message("❌ Server not setup!", ephemeral=True)
+        return
+    
+    num_keys = len(guild_config["valid_keys"])
+    role = interaction.guild.get_role(guild_config["role_id"])
+    
+    await interaction.response.send_message(
+        f"🔑 **Key Status**\n"
+        f"• Available keys: {num_keys}\n"
+        f"• Target role: {role.mention if role else '❌ Role not found!'}\n"
+        f"• Server ID: {guild_id}",
+        ephemeral=True
+    )
+
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
