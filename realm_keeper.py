@@ -257,17 +257,21 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             if self.success_message.value:
                 success_msgs = [msg.strip() for msg in self.success_message.value.split("\n") if msg.strip()]
             
-            # Parse initial keys if provided
+            # Parse and hash initial keys
             initial_key_set = set()
             if self.initial_keys.value:
-                initial_key_set = {k.strip() for k in self.initial_keys.value.split("\n") if k.strip()}
+                initial_key_set = {
+                    key_security.hash_key(k.strip())
+                    for k in self.initial_keys.value.split("\n") 
+                    if k.strip()
+                }
             
             # Store configuration
             config[guild_id] = GuildConfig(
                 roles[0].id,
                 initial_key_set,
                 command,
-                success_msgs  # Pass list of messages
+                success_msgs
             )
             await save_config()
             
@@ -317,16 +321,20 @@ class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
 
+        # Hash and add new keys
         key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
-        existing = guild_config.valid_keys
-        new_keys = [k for k in key_list if k not in existing]
+        new_hashes = set()
+        for key in key_list:
+            if not any(key_security.verify_key(key, h) for h in guild_config.valid_keys):
+                new_hashes.add(key_security.hash_key(key))
         
-        guild_config.valid_keys.update(new_keys)
+        guild_config.valid_keys.update(new_hashes)
         await save_config()
+        await audit.log_key_add(interaction, len(new_hashes))
 
         await interaction.response.send_message(
-            f"✅ Added {len(new_keys)} new keys!\n"
-            f"• Duplicates skipped: {len(key_list)-len(new_keys)}\n"
+            f"✅ Added {len(new_hashes)} new keys!\n"
+            f"• Duplicates skipped: {len(key_list)-len(new_hashes)}\n"
             f"• Total keys: {len(guild_config.valid_keys)}",
             ephemeral=True
         )
@@ -346,10 +354,18 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Keys"):
             return
 
         key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
+        removed = 0
         
-        removed = sum(1 for k in key_list if k in guild_config.valid_keys)
-        guild_config.valid_keys -= set(key_list)
+        # Find and remove matching hashed keys
+        for key in key_list:
+            for hash_ in list(guild_config.valid_keys):  # Use list to avoid modification during iteration
+                if key_security.verify_key(key, hash_):
+                    guild_config.valid_keys.remove(hash_)
+                    removed += 1
+                    break
+        
         await save_config()
+        await audit.log_key_remove(interaction, removed)
 
         await interaction.response.send_message(
             f"✅ Removed {removed} keys!\n"
@@ -432,12 +448,16 @@ async def addkey(interaction: discord.Interaction, key: str):
         await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
         return
 
-    if key in guild_config.valid_keys:
+    # Check if key already exists
+    if any(key_security.verify_key(key, h) for h in guild_config.valid_keys):
         await interaction.response.send_message("❌ Key exists!", ephemeral=True)
         return
 
-    guild_config.valid_keys.add(key)
+    # Store hashed key
+    hashed = key_security.hash_key(key)
+    guild_config.valid_keys.add(hashed)
     await save_config()
+    await audit.log_key_add(interaction, 1)
     await interaction.response.send_message("✅ Key added!", ephemeral=True)
 
 @bot.tree.command(name="addkeys", description="Bulk add keys")
@@ -453,12 +473,20 @@ async def removekey(interaction: discord.Interaction, key: str):
         await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
         return
 
-    if key not in guild_config.valid_keys:
+    removed = False
+    # Iterate through all hashes to find matching key
+    for hash_ in list(guild_config.valid_keys):
+        if key_security.verify_key(key, hash_):
+            guild_config.valid_keys.discard(hash_)
+            removed = True
+            break
+    
+    if not removed:
         await interaction.response.send_message("❌ Key not found!", ephemeral=True)
         return
 
-    guild_config.valid_keys.discard(key)
     await save_config()
+    await audit.log_key_remove(interaction, 1)
     await interaction.response.send_message("✅ Key removed!", ephemeral=True)
 
 @bot.tree.command(name="removekeys", description="Bulk remove keys")
@@ -483,10 +511,12 @@ async def clearkeys(interaction: discord.Interaction):
             if button_interaction.user != interaction.user:
                 return
                 
+            count = len(guild_config.valid_keys)
             guild_config.valid_keys.clear()
             await save_config()
+            await audit.log_key_remove(interaction, count)
             await button_interaction.response.edit_message(
-                content="✅ All keys cleared!",
+                content=f"✅ Cleared {count} keys!",
                 view=None
             )
 
@@ -598,6 +628,10 @@ async def process_claim(interaction: discord.Interaction, key: str):
             if not role:
                 raise ValueError("Role not found")
                 
+            # Verify bot can manage the role
+            if role >= interaction.guild.me.top_role:
+                raise PermissionError("Bot role too low")
+                
             if role in interaction.user.roles:
                 raise ValueError("Already claimed")
             
@@ -635,27 +669,32 @@ async def process_claim(interaction: discord.Interaction, key: str):
         await handle_claim_error(interaction, e)
 
 async def handle_claim_error(interaction: discord.Interaction, error: Exception):
+    # Add detailed error logging
+    logging.error(f"Claim Error: {str(error)}", exc_info=True)
+    
     error_messages = {
         ValueError: {
-            "Server not configured": "🕳️ The sacred portal is not yet opened!",
-            "Invalid key": "✨ These runes hold no power here!",
-            "Role not found": "🌌 The mystical role has vanished!",
-            "Already claimed": "🎭 You have already unlocked this power!"
+            "Server not configured": "🔧 Server not configured! Use /setup first",
+            "Invalid key": "🔑 Invalid or expired key!",
+            "Role not found": "👻 Role missing - contact admin!",
+            "Already claimed": "🎭 You already have this role!"
         },
-        PermissionError: "⚡ The cosmic forces deny my power! (Need higher role)",
-        commands.CommandOnCooldown: lambda e: f"⏳ The time vortex slows you - try again in {e.retry_after:.1f}s"
+        PermissionError: "📛 Bot needs higher role position!",
+        commands.CommandOnCooldown: lambda e: f"⏳ Try again in {e.retry_after:.1f}s"
     }
     
-    # Get error message
-    if type(error) in error_messages:
-        message = error_messages[type(error)]
-        if isinstance(message, dict):
-            message = message.get(str(error), "🌌 Unknown mystical disturbance!")
-        if callable(message):
-            message = message(error)
-    else:
-        message = "🌌 A cosmic disturbance prevents this action!"
+    # Get original error message
+    error_msg = str(error).split('\n')[0]
     
+    if isinstance(error, ValueError):
+        message = error_messages[ValueError].get(error_msg, "❌ Validation error")
+    elif isinstance(error, PermissionError):
+        message = error_messages[PermissionError]
+    elif isinstance(error, commands.CommandOnCooldown):
+        message = error_messages[commands.CommandOnCooldown](error)
+    else:
+        message = "❌ An unexpected error occurred"
+        
     try:
         await interaction.response.send_message(message, ephemeral=True)
     except discord.InteractionResponded:
