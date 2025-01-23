@@ -334,7 +334,8 @@ def require_setup():
             if (guild_config := config.get(interaction.guild.id)) is None:
                 await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
                 return
-            return await func(interaction, guild_config)
+            # Don't pass guild_config, let the function get it if needed
+            return await func(interaction)  # Remove guild_config parameter
         return wrapper
     return decorator
 
@@ -435,8 +436,8 @@ async def clearkeys(interaction: discord.Interaction):
 @bot.tree.command(name="keys", description="Check available keys (Admin only)")
 @app_commands.default_permissions(administrator=True)
 @require_setup()
-async def keys(interaction: discord.Interaction):
-    guild_config = config[interaction.guild.id]
+async def keys(interaction: discord.Interaction):  # Only takes interaction
+    guild_config = config[interaction.guild.id]  # Get config inside function
     role = interaction.guild.get_role(guild_config.role_id)
     await interaction.response.send_message(
         f"🔑 **Key Status**\n"
