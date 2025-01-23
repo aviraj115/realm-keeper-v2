@@ -10,12 +10,13 @@ from discord import app_commands
 from dotenv import load_dotenv
 from typing import Dict, Set, Optional
 import random
-from discord.ext.commands import CooldownMapping, BucketType
+from discord.ext.commands import Cooldown, BucketType
 from collections import defaultdict
 from threading import Lock
 from cryptography.fernet import Fernet
 import base64
 from passlib.hash import bcrypt_sha256
+import time
 
 # Configuration and logging setup
 load_dotenv()
@@ -53,7 +54,33 @@ class GuildConfig:
 config: Dict[int, GuildConfig] = {}
 
 RESERVED_NAMES = {'sync', 'setup', 'addkey', 'addkeys', 'removekey', 'removekeys', 'clearkeys', 'keys', 'grimoire'}
-claim_cooldown = CooldownMapping.from_cooldown(1, 300, BucketType.user)  # 5 minute cooldown
+
+class InteractionBucket(commands.BucketType):
+    @staticmethod
+    def get_key(interaction: discord.Interaction) -> int:
+        return interaction.user.id
+
+class CustomCooldown:
+    def __init__(self, rate: int, per: float):
+        self.cooldown = Cooldown(rate, per)
+        self._cooldowns: Dict[int, float] = {}
+    
+    def get_retry_after(self, interaction: discord.Interaction) -> Optional[float]:
+        now = time.time()
+        key = InteractionBucket.get_key(interaction)
+        
+        if key in self._cooldowns:
+            if now < self._cooldowns[key]:
+                return self._cooldowns[key] - now
+            else:
+                del self._cooldowns[key]
+        
+        self._cooldowns[key] = now + self.cooldown.per
+        return None
+
+# Replace the old cooldown with our new one
+claim_cooldown = CustomCooldown(1, 300)  # 1 attempt per 300 seconds (5 minutes)
+
 key_locks: Dict[int, Lock] = defaultdict(Lock)
 
 async def save_config():
@@ -220,47 +247,47 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             # Defer the response immediately to prevent timeout
             await interaction.response.defer(ephemeral=True)
             
+            # Send initial status
+            progress_msg = await interaction.followup.send(
+                "🔮 Setting up your realm...",
+                ephemeral=True,
+                wait=True
+            )
+            
             guild_id = interaction.guild.id
             role_name = str(self.role_name)
             command = str(self.command_name).lower().strip()
             
             # Validate command name
             if command in RESERVED_NAMES:
-                await interaction.response.send_message(
-                    f"❌ '{command}' is a reserved command name!",
-                    ephemeral=True
-                )
+                await progress_msg.edit(content="❌ That command name is reserved!")
                 return
             
             if not command.isalnum():
-                await interaction.response.send_message(
-                    "❌ Command name must be alphanumeric!",
-                    ephemeral=True
-                )
+                await progress_msg.edit(content="❌ Command name must be alphanumeric!")
                 return
+            
+            # Update progress
+            await progress_msg.edit(content="🔍 Validating role...")
             
             # Find role
             roles = [r for r in interaction.guild.roles if r.name == role_name]
             if len(roles) > 1:
-                await interaction.response.send_message(
-                    "❌ Multiple roles with this name exist!",
-                    ephemeral=True
-                )
+                await progress_msg.edit(content="❌ Multiple roles with this name exist!")
                 return
             
             if not roles:
-                await interaction.response.send_message(
-                    "❌ Role not found! Create it first.",
-                    ephemeral=True
-                )
+                await progress_msg.edit(content="❌ Role not found! Create it first.")
                 return
 
-            # Parse success messages or use defaults
+            # Update progress
+            await progress_msg.edit(content="📝 Processing configuration...")
+
+            # Parse success messages and keys
             success_msgs = []
             if self.success_message.value:
                 success_msgs = [msg.strip() for msg in self.success_message.value.split("\n") if msg.strip()]
             
-            # Parse and hash initial keys
             initial_key_set = set()
             if self.initial_keys.value:
                 initial_key_set = {
@@ -278,23 +305,23 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             )
             await save_config()
             
-            # Create guild-specific command first
+            # Update progress
+            await progress_msg.edit(content="⚡ Creating command...")
+            
+            # Create guild-specific command
             await create_dynamic_command(command, guild_id)
             
-            # Use followup since we deferred
-            await interaction.followup.send(
-                f"🔮 Configuration complete!\n"
-                f"- Activation command: `/{command}`\n"
-                f"- Success messages: {len(success_msgs)}",
-                ephemeral=True
-            )
+            # Final success message
+            await progress_msg.edit(content=(
+                f"✅ Setup complete!\n"
+                f"• Command: `/{command}`\n"
+                f"• Success messages: {len(success_msgs) or len(DEFAULT_SUCCESS_MESSAGES)}\n"
+                f"• Initial keys: {len(initial_key_set)}"
+            ))
             
         except Exception as e:
             try:
-                await interaction.followup.send(
-                    f"❌ Setup failed: {str(e)}",
-                    ephemeral=True
-                )
+                await progress_msg.edit(content=f"❌ Setup failed: {str(e)}")
             except Exception:
                 logging.error(f"Failed to send setup error message: {str(e)}", exc_info=True)
 
@@ -605,9 +632,8 @@ async def create_dynamic_command(name: str, guild_id: int):
 async def process_claim(interaction: discord.Interaction, key: str):
     try:
         # Check cooldown first
-        bucket = claim_cooldown.get_bucket(interaction)
-        if retry_after := bucket.update_rate_limit():
-            raise commands.CommandOnCooldown(bucket, retry_after)
+        if retry_after := claim_cooldown.get_retry_after(interaction):
+            raise commands.CommandOnCooldown(None, retry_after, BucketType.user)
 
         if (guild_config := config.get(interaction.guild.id)) is None:
             raise ValueError("Server not configured")
