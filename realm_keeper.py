@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from dotenv import load_dotenv
 from typing import Dict, Set, Optional
+import random
 
 # Configuration and logging setup
 load_dotenv()
@@ -144,6 +145,24 @@ async def cleanup_task():
         logging.info(f"Removed {removed} inactive guilds")
 
 # Modals
+DEFAULT_SUCCESS_MESSAGES = [
+    "✨ {user} has unlocked the {role}! ✨",
+    "🌟 The ancient runes accept {user} into {role}!",
+    "🔮 {user} has been granted the power of {role}!",
+    "⚡ The portal opens, welcoming {user} to {role}!",
+    "🎭 {user} has proven worthy of {role}!",
+    "🌌 The stars align as {user} joins {role}!",
+    "🎋 Ancient spirits welcome {user} to {role}!",
+    "🔱 The sacred gates open for {user} to enter {role}!",
+    "💫 {user} has been chosen by the {role} spirits!",
+    "🌠 The mystical energies embrace {user} in {role}!",
+    "🏮 {user} lights the eternal flame of {role}!",
+    "🌸 The sacred blossoms welcome {user} to {role}!",
+    "⭐ {user} has awakened the power of {role}!",
+    "🌙 The moon blesses {user} with {role}!",
+    "🎆 The realms rejoice as {user} joins {role}!"
+]
+
 class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     role_name = discord.ui.TextInput(
         label="Role Name (exact match)",
@@ -161,10 +180,10 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     )
     
     success_message = discord.ui.TextInput(
-        label="Success Message Template",
+        label="Success Message Template (or leave empty for random)",
         placeholder="{user} has unlocked the {role}!",
         style=discord.TextStyle.long,
-        required=True
+        required=False
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -172,7 +191,6 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             guild_id = interaction.guild.id
             role_name = str(self.role_name)
             command = str(self.command_name).lower().strip()
-            success_template = str(self.success_message)
             
             # Validate command name
             if not command.isalnum():
@@ -198,6 +216,9 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
                 )
                 return
 
+            # Use random default message if none provided
+            success_template = str(self.success_message) if self.success_message.value else random.choice(DEFAULT_SUCCESS_MESSAGES)
+            
             # Store configuration
             config[guild_id] = GuildConfig(
                 roles[0].id,
@@ -415,24 +436,6 @@ class ClaimSystem:
             return uuid.UUID(key).version == 4
         except ValueError:
             return False
-
-@bot.tree.command(name="claim", description="Claim your role")
-@app_commands.describe(key="Your activation key")
-async def claim(interaction: discord.Interaction, key: str):
-    try:
-        # Validate key format
-        if not ClaimSystem.is_valid_key(key):
-            raise ValueError("Invalid key format")
-            
-        # Check cooldown
-        bucket = ClaimSystem._cooldown.get_bucket(interaction)
-        if retry_after := bucket.update_rate_limit():
-            raise commands.CommandOnCooldown(bucket, retry_after)
-            
-        await process_claim(interaction, key)
-        
-    except Exception as e:
-        await handle_claim_error(interaction, e)
 
 async def process_claim(interaction: discord.Interaction, key: str):
     guild_id = interaction.guild.id
