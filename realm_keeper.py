@@ -207,9 +207,8 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             )
             await save_config()
             
-            # Create dynamic command
-            create_dynamic_command(command)
-            await bot.tree.sync()  # Sync the new command
+            # Create and sync dynamic command
+            await create_dynamic_command(command)
             
             await interaction.response.send_message(
                 f"🔮 Configuration complete!\n"
@@ -482,7 +481,7 @@ async def process_claim(interaction: discord.Interaction, key: str):
     except Exception as e:
         await handle_claim_error(interaction, e)
 
-def create_dynamic_command(name: str):
+async def create_dynamic_command(name: str):
     # Remove existing command if it exists
     try:
         existing = bot.tree.get_command(name)
@@ -499,7 +498,8 @@ def create_dynamic_command(name: str):
         
     # Update command tree
     bot.tree.add_command(dynamic_claim)
-    logging.info(f"Created dynamic command /{name}")
+    await bot.tree.sync()  # Sync after adding command
+    logging.info(f"Created and synced dynamic command /{name}")
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
