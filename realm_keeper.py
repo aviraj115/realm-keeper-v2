@@ -279,7 +279,11 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Keys"):
             ephemeral=True
         )
 
-class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Arcane Gateway"):
+class ArcaneGatewayModal(discord.ui.Modal):
+    def __init__(self):
+        # Get custom title from config if available
+        super().__init__(title="🔮 Arcane Gateway")
+        
     key = discord.ui.TextInput(
         label="Speak the Ancient Rune",
         placeholder="Enter your mystical key...",
@@ -470,11 +474,17 @@ async def process_claim(interaction: discord.Interaction, key: str):
 
 async def create_dynamic_command(name: str, guild_id: int):
     try:
-        # Create guild-specific command
+        # Remove old command if it exists
+        old_command = bot.tree.get_command("claim", guild=discord.Object(id=guild_id))
+        if old_command:
+            bot.tree.remove_command("claim", guild=discord.Object(id=guild_id))
+            logging.info(f"Removed old claim command for guild {guild_id}")
+
+        # Create new guild-specific command
         @bot.tree.command(name=name, description="Unlock your mystical powers", guild=discord.Object(id=guild_id))
-        @app_commands.describe(key="The ancient secret phrase")
-        async def dynamic_claim(interaction: discord.Interaction, key: str):
-            await process_claim(interaction, key)
+        async def dynamic_claim(interaction: discord.Interaction):  # Remove key parameter
+            # Show the modal instead
+            await interaction.response.send_modal(ArcaneGatewayModal())
             
         # Sync only to this guild
         await bot.tree.sync(guild=discord.Object(id=guild_id))
