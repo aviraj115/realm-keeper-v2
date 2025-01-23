@@ -25,3 +25,4 @@ Keeper of your keys and channels!
 - `/removekeys` - Bulk remove keys (Admin only)
 - `/clearkeys` - Clear all keys (Admin only)
 - `/claim` - Claim a role with a valid key
+- `/keys` - Check number of available keys (Admin only)

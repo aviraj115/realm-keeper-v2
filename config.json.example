@@ -1,8 +1,10 @@
 {
     "guilds": {
-        "guild_id": {
-            "role_id": 123456789,
-            "valid_keys": []
+        "123456789": {
+            "role_id": 987654321,
+            "valid_keys": [],
+            "command": "openportal",
+            "success_msg": "{user} has unlocked the {role}!"
         }
     }
-} 
+}
