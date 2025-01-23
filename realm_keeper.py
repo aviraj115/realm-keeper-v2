@@ -35,14 +35,14 @@ bot = commands.AutoShardedBot(
 
 # Configuration handling
 class GuildConfig:
-    __slots__ = ('role_id', 'valid_keys', 'command', 'success_msg')
+    __slots__ = ('role_id', 'valid_keys', 'command', 'success_msgs')
     
     def __init__(self, role_id: int, valid_keys: Set[str], command: str = "claim", 
-                 success_msg: str = "{user} has unlocked the {role}!"):
+                 success_msgs: list = None):
         self.role_id = role_id
         self.valid_keys = valid_keys
         self.command = command
-        self.success_msg = success_msg
+        self.success_msgs = success_msgs or DEFAULT_SUCCESS_MESSAGES.copy()
 
 config: Dict[int, GuildConfig] = {}
 
@@ -53,7 +53,7 @@ async def save_config():
                 "role_id": cfg.role_id,
                 "valid_keys": list(cfg.valid_keys),
                 "command": cfg.command,
-                "success_msg": cfg.success_msg
+                "success_msgs": cfg.success_msgs
             }
             for guild_id, cfg in config.items()
         }
@@ -76,7 +76,7 @@ async def load_config():
                     cfg["role_id"],
                     set(cfg["valid_keys"]),
                     cfg.get("command", "claim"),
-                    cfg.get("success_msg", "{user} has unlocked the {role}!")
+                    cfg.get("success_msgs", DEFAULT_SUCCESS_MESSAGES.copy())
                 )
                 for guild_id, cfg in data.items()  # Removed ["guilds"]
             }
@@ -180,8 +180,8 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     )
     
     success_message = discord.ui.TextInput(
-        label="Success Message (empty for random)",
-        placeholder="{user} has unlocked the {role}!",
+        label="Success Messages (one per line, empty=default)",
+        placeholder="✨ {user} unlocked {role}!\n🌟 {user} joined {role}!",
         style=discord.TextStyle.long,
         required=False
     )
@@ -223,8 +223,10 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
                 )
                 return
 
-            # Use random default message if none provided
-            success_template = str(self.success_message) if self.success_message.value else random.choice(DEFAULT_SUCCESS_MESSAGES)
+            # Parse success messages or use defaults
+            success_msgs = []
+            if self.success_message.value:
+                success_msgs = [msg.strip() for msg in self.success_message.value.split("\n") if msg.strip()]
             
             # Parse initial keys if provided
             initial_key_set = set()
@@ -234,9 +236,9 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             # Store configuration
             config[guild_id] = GuildConfig(
                 roles[0].id,
-                initial_key_set,  # Use the initial keys
+                initial_key_set,
                 command,
-                success_template
+                success_msgs  # Pass list of messages
             )
             await save_config()
             
@@ -247,8 +249,7 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
                 await interaction.response.send_message(
                     f"🔮 Configuration complete!\n"
                     f"- Activation command: `/{command}`\n"
-                    f"- Success template: `{success_template}`\n"
-                    f"- Initial keys added: {len(initial_key_set)}",
+                    f"- Success messages: {len(success_msgs)}",
                     ephemeral=True
                 )
             except discord.NotFound:  # Handle interaction timeout
@@ -256,8 +257,7 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
                 await interaction.followup.send(
                     f"🔮 Configuration complete!\n"
                     f"- Activation command: `/{command}`\n"
-                    f"- Success template: `{success_template}`\n"
-                    f"- Initial keys added: {len(initial_key_set)}",
+                    f"- Success messages: {len(success_msgs)}",
                     ephemeral=True
                 )
             
@@ -564,8 +564,8 @@ async def process_claim(interaction: discord.Interaction, key: str):
         guild_config.valid_keys.remove(key)
         await save_config()
         
-        # Get custom message template
-        template = guild_config.success_msg
+        # Get random success message
+        template = random.choice(guild_config.success_msgs)
         formatted = template.format(
             user=interaction.user.mention,
             role=role.mention,
