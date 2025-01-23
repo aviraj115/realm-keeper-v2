@@ -428,20 +428,7 @@ async def claim(interaction: discord.Interaction, key: str):
         await process_claim(interaction, key)
         
     except Exception as e:
-        error_map = {
-            "Invalid key format": "❌ Invalid key format!",
-            "Server not configured": "❌ Server not setup!",
-            "Invalid key": "❌ Invalid key!",
-            "Role not found": "❌ Role missing!",
-            "Bot role too low": "❌ Bot needs higher role position!",
-            "CommandOnCooldown": lambda e: f"⏳ Try again in {e.retry_after:.1f} seconds"
-        }
-        
-        message = error_map.get(type(e).__name__, "❌ An error occurred")
-        if callable(message):
-            message = message(e)
-            
-        await interaction.response.send_message(message, ephemeral=True)
+        await handle_claim_error(interaction, e)
 
 async def process_claim(interaction: discord.Interaction, key: str):
     guild_id = interaction.guild.id
@@ -496,6 +483,30 @@ async def create_dynamic_command(name: str, guild_id: int):
     except Exception as e:
         logging.error(f"Failed to create command /{name}: {e}")
         raise
+
+async def handle_claim_error(interaction: discord.Interaction, error: Exception):
+    error_messages = {
+        ValueError: {
+            "Invalid key format": "🌀 The ancient runes reject your offering!",
+            "Server not configured": "🕳️ The sacred portal is not yet opened!",
+            "Invalid key": "✨ These runes hold no power here!",
+            "Role not found": "🌌 The mystical role has vanished!"
+        },
+        PermissionError: "⚡ The cosmic forces deny my power! (Need higher role)",
+        commands.CommandOnCooldown: lambda e: f"⏳ The time vortex slows you - try again in {e.retry_after:.1f}s"
+    }
+    
+    # Get error message
+    if type(error) in error_messages:
+        message = error_messages[type(error)]
+        if isinstance(message, dict):
+            message = message.get(str(error), "🌌 Unknown mystical disturbance!")
+        if callable(message):
+            message = message(error)
+    else:
+        message = "🌌 A cosmic disturbance prevents this action!"
+    
+    await interaction.response.send_message(message, ephemeral=True)
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
