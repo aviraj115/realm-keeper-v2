@@ -4,6 +4,9 @@ from discord.ext import commands
 from discord import app_commands
 import os
 from dotenv import load_dotenv
+import uuid
+import fcntl
+import shutil
 
 # At the top of the file
 load_dotenv()
@@ -21,8 +24,15 @@ except FileNotFoundError:
     config = {"guilds": {}}
 
 def save_config():
+    # Create backup
+    shutil.copy2('config.json', 'config.json.bak')
+    
     with open('config.json', 'w') as f:
-        json.dump(config, f, indent=4)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            json.dump(config, f, indent=4)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 @bot.event
 async def on_ready():
@@ -52,9 +62,15 @@ class SetupModal(discord.ui.Modal, title="Server Setup"):
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild.id)
-        role = discord.utils.get(interaction.guild.roles, name=str(self.role_name))
+        roles = [r for r in interaction.guild.roles if r.name == str(self.role_name)]
+        if len(roles) > 1:
+            await interaction.response.send_message(
+                "❌ Multiple roles with this name exist!",
+                ephemeral=True
+            )
+            return
         
-        if not role:
+        if not roles:
             await interaction.response.send_message(
                 "❌ Role not found! Create it first.",
                 ephemeral=True
@@ -62,12 +78,12 @@ class SetupModal(discord.ui.Modal, title="Server Setup"):
             return
 
         config["guilds"][guild_id] = {
-            "role_id": role.id,
+            "role_id": roles[0].id,
             "valid_keys": []
         }
         save_config()
         await interaction.response.send_message(
-            f"✅ Setup complete! Role set to {role.mention}.",
+            f"✅ Setup complete! Role set to {roles[0].mention}.",
             ephemeral=True
         )
 
@@ -208,15 +224,26 @@ async def clearkeys(interaction: discord.Interaction):
         ephemeral=True
     )
     
+def is_valid_uuid(key):
+    try:
+        uuid.UUID(str(key))
+        return True
+    except ValueError:
+        return False
+
+@commands.cooldown(1, 60, commands.BucketType.user)  # 1 attempt per minute
 @bot.tree.command(name="claim", description="Claim your role")
 async def claim(interaction: discord.Interaction, key: str):
+    if not is_valid_uuid(key):
+        await interaction.response.send_message("❌ Invalid key format!", ephemeral=True)
+        return
+
     try:
         guild_id = str(interaction.guild.id)
-        if guild_id not in config["guilds"]:
+        if (guild_config := config["guilds"].get(guild_id)) is None:
             await interaction.response.send_message("❌ Server not setup!", ephemeral=True)
             return
 
-        guild_config = config["guilds"][guild_id]
         if key not in guild_config["valid_keys"]:
             await interaction.response.send_message("❌ Invalid key!", ephemeral=True)
             return
@@ -248,8 +275,14 @@ async def claim(interaction: discord.Interaction, key: str):
             ephemeral=True
         )
 
+async def cleanup_unused_guilds():
+    for guild_id in list(config["guilds"].keys()):
+        if not bot.get_guild(int(guild_id)):
+            del config["guilds"][guild_id]
+    save_config()
+
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
-        raise ValueError("No token found in .env file")
+        raise ValueError("No Discord token found! Make sure to create a .env file with DISCORD_TOKEN=your_token_here")
     bot.run(TOKEN)
