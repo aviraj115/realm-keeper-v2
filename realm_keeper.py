@@ -549,12 +549,16 @@ async def process_claim(interaction: discord.Interaction, key: str):
         if (guild_config := config.get(interaction.guild.id)) is None:
             raise ValueError("Server not configured")
             
-        if key not in guild_config.valid_keys:
-            raise ValueError("Invalid key")
-            
+        # Check if user already has the role
         role = interaction.guild.get_role(guild_config.role_id)
         if not role:
             raise ValueError("Role not found")
+            
+        if role in interaction.user.roles:
+            raise ValueError("Already claimed")
+            
+        if key not in guild_config.valid_keys:
+            raise ValueError("Invalid key")
             
         if role >= interaction.guild.me.top_role:
             raise PermissionError("Bot role too low")
@@ -585,7 +589,8 @@ async def handle_claim_error(interaction: discord.Interaction, error: Exception)
         ValueError: {
             "Server not configured": "🕳️ The sacred portal is not yet opened!",
             "Invalid key": "✨ These runes hold no power here!",
-            "Role not found": "🌌 The mystical role has vanished!"
+            "Role not found": "🌌 The mystical role has vanished!",
+            "Already claimed": "🎭 You have already unlocked this power!"
         },
         PermissionError: "⚡ The cosmic forces deny my power! (Need higher role)",
         commands.CommandOnCooldown: lambda e: f"⏳ The time vortex slows you - try again in {e.retry_after:.1f}s"
