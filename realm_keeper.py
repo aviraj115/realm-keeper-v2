@@ -8,7 +8,7 @@ import aiofiles.os
 from discord.ext import commands, tasks
 from discord import app_commands
 from dotenv import load_dotenv
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 
 # Configuration and logging setup
 load_dotenv()
@@ -34,11 +34,14 @@ bot = commands.AutoShardedBot(
 
 # Configuration handling
 class GuildConfig:
-    __slots__ = ('role_id', 'valid_keys')
+    __slots__ = ('role_id', 'valid_keys', 'command', 'success_msg')
     
-    def __init__(self, role_id: int, valid_keys: Set[str]):
+    def __init__(self, role_id: int, valid_keys: Set[str], command: str = "claim", 
+                 success_msg: str = "{user} has unlocked the {role}!"):
         self.role_id = role_id
         self.valid_keys = valid_keys
+        self.command = command
+        self.success_msg = success_msg
 
 config: Dict[int, GuildConfig] = {}
 
@@ -47,7 +50,9 @@ async def save_config():
         serialized = {
             str(guild_id): {
                 "role_id": cfg.role_id,
-                "valid_keys": list(cfg.valid_keys)
+                "valid_keys": list(cfg.valid_keys),
+                "command": cfg.command,
+                "success_msg": cfg.success_msg
             }
             for guild_id, cfg in config.items()
         }
@@ -68,7 +73,9 @@ async def load_config():
             config = {
                 int(guild_id): GuildConfig(
                     cfg["role_id"],
-                    set(cfg["valid_keys"])
+                    set(cfg["valid_keys"]),
+                    cfg["command"],
+                    cfg["success_msg"]
                 )
                 for guild_id, cfg in data.items()
             }
@@ -228,6 +235,17 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Keys"):
             ephemeral=True
         )
 
+class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Arcane Gateway"):
+    key = discord.ui.TextInput(
+        label="Speak the Ancient Rune",
+        placeholder="Enter your mystical key...",
+        style=discord.TextStyle.short,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await process_claim(interaction, str(self.key))
+
 # Commands
 @bot.tree.command(name="sync", description="♻️ Sync commands (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -363,7 +381,28 @@ async def claim(interaction: discord.Interaction, key: str):
         if retry_after := bucket.update_rate_limit():
             raise commands.CommandOnCooldown(bucket, retry_after)
             
-        guild_id = interaction.guild.id
+        await process_claim(interaction, key)
+        
+    except Exception as e:
+        error_map = {
+            "Invalid key format": "❌ Invalid key format!",
+            "Server not configured": "❌ Server not setup!",
+            "Invalid key": "❌ Invalid key!",
+            "Role not found": "❌ Role missing!",
+            "Bot role too low": "❌ Bot needs higher role position!",
+            "CommandOnCooldown": lambda e: f"⏳ Try again in {e.retry_after:.1f} seconds"
+        }
+        
+        message = error_map.get(type(e).__name__, "❌ An error occurred")
+        if callable(message):
+            message = message(e)
+            
+        await interaction.response.send_message(message, ephemeral=True)
+
+async def process_claim(interaction: discord.Interaction, key: str):
+    guild_id = interaction.guild.id
+    
+    try:
         if (guild_config := config.get(guild_id)) is None:
             raise ValueError("Server not configured")
             
@@ -382,26 +421,30 @@ async def claim(interaction: discord.Interaction, key: str):
         guild_config.valid_keys.remove(key)
         await save_config()
         
+        # Get custom message template
+        template = guild_config.success_msg
+        formatted = template.format(
+            user=interaction.user.mention,
+            role=role.mention,
+            key=f"`{key}`"
+        )
+        
         await interaction.response.send_message(
-            f"🎉 {interaction.user.mention}, welcome!",
+            f"✨ {formatted} ✨",
             ephemeral=True
         )
         
     except Exception as e:
-        error_map = {
-            "Invalid key format": "❌ Invalid key format!",
-            "Server not configured": "❌ Server not setup!",
-            "Invalid key": "❌ Invalid key!",
-            "Role not found": "❌ Role missing!",
-            "Bot role too low": "❌ Bot needs higher role position!",
-            "CommandOnCooldown": lambda e: f"⏳ Try again in {e.retry_after:.1f} seconds"
-        }
+        await handle_claim_error(interaction, e)
+
+def create_dynamic_command(name: str):
+    @bot.tree.command(name=name, description="Unlock your mystical powers")
+    @app_commands.describe(key="The ancient secret phrase")
+    async def dynamic_claim(interaction: discord.Interaction, key: str):
+        await process_claim(interaction, key)
         
-        message = error_map.get(type(e).__name__, "❌ An error occurred")
-        if callable(message):
-            message = message(e)
-            
-        await interaction.response.send_message(message, ephemeral=True)
+    # Update command tree
+    bot.tree.add_command(dynamic_claim)
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
