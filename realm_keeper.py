@@ -169,7 +169,7 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            guild_id = str(interaction.guild.id)
+            guild_id = interaction.guild.id
             role_name = str(self.role_name)
             command = str(self.command_name).lower().strip()
             success_template = str(self.success_message)
@@ -207,8 +207,8 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             )
             await save_config()
             
-            # Create and sync dynamic command
-            await create_dynamic_command(command)
+            # Create guild-specific command
+            await create_dynamic_command(command, guild_id)
             
             await interaction.response.send_message(
                 f"🔮 Configuration complete!\n"
@@ -481,25 +481,21 @@ async def process_claim(interaction: discord.Interaction, key: str):
     except Exception as e:
         await handle_claim_error(interaction, e)
 
-async def create_dynamic_command(name: str):
-    # Remove existing command if it exists
+async def create_dynamic_command(name: str, guild_id: int):
     try:
-        existing = bot.tree.get_command(name)
-        if existing:
-            bot.tree.remove_command(name)
-            logging.info(f"Removed existing command /{name}")
-    except:
-        pass
+        # Create guild-specific command
+        @bot.tree.command(name=name, description="Unlock your mystical powers", guild=discord.Object(id=guild_id))
+        @app_commands.describe(key="The ancient secret phrase")
+        async def dynamic_claim(interaction: discord.Interaction, key: str):
+            await process_claim(interaction, key)
+            
+        # Sync only to this guild
+        await bot.tree.sync(guild=discord.Object(id=guild_id))
+        logging.info(f"Created command /{name} for guild {guild_id}")
         
-    @bot.tree.command(name=name, description="Unlock your mystical powers")
-    @app_commands.describe(key="The ancient secret phrase")
-    async def dynamic_claim(interaction: discord.Interaction, key: str):
-        await process_claim(interaction, key)
-        
-    # Update command tree
-    bot.tree.add_command(dynamic_claim)
-    await bot.tree.sync()  # Sync after adding command
-    logging.info(f"Created and synced dynamic command /{name}")
+    except Exception as e:
+        logging.error(f"Failed to create command /{name}: {e}")
+        raise
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
