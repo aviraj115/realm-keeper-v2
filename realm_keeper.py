@@ -217,6 +217,9 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Defer the response immediately to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
             guild_id = interaction.guild.id
             role_name = str(self.role_name)
             command = str(self.command_name).lower().strip()
@@ -278,33 +281,22 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             # Create guild-specific command first
             await create_dynamic_command(command, guild_id)
             
-            try:
-                await interaction.response.send_message(
-                    f"🔮 Configuration complete!\n"
-                    f"- Activation command: `/{command}`\n"
-                    f"- Success messages: {len(success_msgs)}",
-                    ephemeral=True
-                )
-            except discord.NotFound:  # Handle interaction timeout
-                # Try to send a followup if original response fails
-                await interaction.followup.send(
-                    f"🔮 Configuration complete!\n"
-                    f"- Activation command: `/{command}`\n"
-                    f"- Success messages: {len(success_msgs)}",
-                    ephemeral=True
-                )
+            # Use followup since we deferred
+            await interaction.followup.send(
+                f"🔮 Configuration complete!\n"
+                f"- Activation command: `/{command}`\n"
+                f"- Success messages: {len(success_msgs)}",
+                ephemeral=True
+            )
             
         except Exception as e:
             try:
-                await interaction.response.send_message(
-                    f"❌ Setup failed: {str(e)}",
-                    ephemeral=True
-                )
-            except discord.NotFound:
                 await interaction.followup.send(
                     f"❌ Setup failed: {str(e)}",
                     ephemeral=True
                 )
+            except Exception:
+                logging.error(f"Failed to send setup error message: {str(e)}", exc_info=True)
 
 class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
     keys = discord.ui.TextInput(
