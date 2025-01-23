@@ -40,7 +40,6 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} commands: {[cmd.name for cmd in synced]}")
-        await bot.tree.sync(guild=discord.Object(id=YOUR_GUILD_ID))
     except Exception as e:
         print(f"❌ Sync failed: {e}")
 
