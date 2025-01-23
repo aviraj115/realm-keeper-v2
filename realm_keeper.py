@@ -1,7 +1,6 @@
 import discord
 import json
 import os
-import uuid
 import logging
 import aiofiles
 import aiofiles.os
@@ -12,12 +11,10 @@ from typing import Dict, Set, Optional
 import random
 from discord.ext.commands import Cooldown, BucketType
 from collections import defaultdict
-from threading import Lock
 import asyncio
-from cryptography.fernet import Fernet
-import base64
 from passlib.hash import bcrypt_sha256
 import time
+import uuid
 
 # Configuration and logging setup
 load_dotenv()
@@ -130,24 +127,35 @@ claim_cooldown = CustomCooldown(1, 300)  # 1 attempt per 300 seconds (5 minutes)
 key_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 async def save_config():
-    async with aiofiles.open('config.json', 'w') as f:
-        serialized = {
-            str(guild_id): {
-                "role_id": cfg.role_id,
-                "valid_keys": list(cfg.valid_keys),
-                "command": cfg.command,
-                "success_msgs": cfg.success_msgs
+    try:
+        # Save main config
+        async with aiofiles.open('config.json', 'w') as f:
+            serialized = {
+                str(guild_id): {
+                    "role_id": cfg.role_id,
+                    "valid_keys": list(cfg.valid_keys),
+                    "command": cfg.command,
+                    "success_msgs": cfg.success_msgs
+                }
+                for guild_id, cfg in config.items()
             }
-            for guild_id, cfg in config.items()
-        }
-        await f.write(json.dumps(serialized, indent=4))
-    
-    # Rotate backups (keep last 3)
-    for i in range(2, -1, -1):
-        src = f'config.json{"." + str(i) if i else ""}'
-        dest = f'config.json.{i+1}'
-        if await aiofiles.os.path.exists(src):
-            await aiofiles.os.replace(src, dest)
+            await f.write(json.dumps(serialized, indent=4))
+        
+        # Safely rotate backups
+        for i in range(2, -1, -1):
+            src = f'config.json{"." + str(i) if i else ""}'
+            dest = f'config.json.{i+1}'
+            try:
+                if await aiofiles.os.path.exists(src):
+                    if await aiofiles.os.path.exists(dest):
+                        await aiofiles.os.remove(dest)
+                    await aiofiles.os.rename(src, dest)
+            except Exception as e:
+                logging.error(f"Backup rotation error: {str(e)}")
+                
+    except Exception as e:
+        logging.error(f"Failed to save config: {str(e)}")
+        raise
 
 async def load_config():
     global config
@@ -191,6 +199,7 @@ async def sync_commands():
 async def on_ready():
     await load_config()
     cleanup_task.start()
+    save_stats_task.start()
     
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     
@@ -238,6 +247,44 @@ async def cleanup_task():
     if removed:
         await save_config()
         logging.info(f"Removed {removed} inactive guilds")
+
+@tasks.loop(minutes=5)
+async def save_stats_task():
+    try:
+        await stats.save_stats()
+    except Exception as e:
+        logging.error(f"Failed to save stats: {str(e)}")
+
+@tasks.loop(hours=1)
+async def cleanup_expired_keys():
+    """Remove expired keys periodically"""
+    try:
+        now = time.time()
+        for guild_id, guild_config in config.items():
+            original_count = len(guild_config.valid_keys)
+            valid_keys = set()
+            
+            for full_hash in guild_config.valid_keys:
+                try:
+                    if '$' in full_hash:
+                        _, meta_part = full_hash.rsplit('$', 1)
+                        metadata = json.loads(meta_part)
+                        if metadata.get('exp') and metadata['exp'] < now:
+                            continue  # Skip expired
+                        if metadata.get('uses') and metadata['uses'] <= 0:
+                            continue  # Skip used up
+                    valid_keys.add(full_hash)
+                except:
+                    valid_keys.add(full_hash)  # Keep malformed hashes
+            
+            removed = original_count - len(valid_keys)
+            if removed > 0:
+                guild_config.valid_keys = valid_keys
+                await save_config()
+                logging.info(f"Removed {removed} expired/used keys from guild {guild_id}")
+                
+    except Exception as e:
+        logging.error(f"Error in key cleanup: {str(e)}")
 
 # Modals
 DEFAULT_SUCCESS_MESSAGES = [
@@ -398,30 +445,57 @@ class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
         required=True,
         max_length=2000
     )
+    
+    expires_in = discord.ui.TextInput(
+        label="Expiry time (hours, optional)",
+        style=discord.TextStyle.short,
+        required=False,
+        placeholder="24"
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
-        guild_id = interaction.guild.id
-        if (guild_config := config.get(guild_id)) is None:
-            await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
-            return
+        try:
+            guild_id = interaction.guild.id
+            if (guild_config := config.get(guild_id)) is None:
+                await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+                return
 
-        # Hash and add new keys
-        key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
-        new_hashes = set()
-        for key in key_list:
-            if not any(key_security.verify_key(key, h) for h in guild_config.valid_keys):
-                new_hashes.add(key_security.hash_key(key))
-        
-        guild_config.valid_keys.update(new_hashes)
-        await save_config()
-        await audit.log_key_add(interaction, len(new_hashes))
+            # Parse expiry
+            expiry_seconds = None
+            if self.expires_in.value:
+                try:
+                    hours = float(self.expires_in.value)
+                    expiry_seconds = int(hours * 3600)
+                except ValueError:
+                    await interaction.response.send_message("❌ Invalid expiry time!", ephemeral=True)
+                    return
 
-        await interaction.response.send_message(
-            f"✅ Added {len(new_hashes)} new keys!\n"
-            f"• Duplicates skipped: {len(key_list)-len(new_hashes)}\n"
-            f"• Total keys: {len(guild_config.valid_keys)}",
-            ephemeral=True
-        )
+            # Hash and add new keys
+            key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
+            new_hashes = set()
+            for key in key_list:
+                if not any(key_security.verify_key(key, h) for h in guild_config.valid_keys):
+                    new_hashes.add(key_security.hash_key(key, expiry_seconds))
+            
+            guild_config.valid_keys.update(new_hashes)
+            await save_config()
+            stats.log_keys_added(guild_id, len(new_hashes))
+            await audit.log_key_add(interaction, len(new_hashes))
+            
+            msg = f"✅ Added {len(new_hashes)} new keys!\n"
+            msg += f"• Duplicates skipped: {len(key_list)-len(new_hashes)}\n"
+            msg += f"• Total keys: {len(guild_config.valid_keys)}"
+            if expiry_seconds:
+                msg += f"\n• Expires in: {self.expires_in.value} hours"
+            
+            await interaction.response.send_message(msg, ephemeral=True)
+                
+        except Exception as e:
+            logging.error(f"Key addition error: {str(e)}")
+            await interaction.response.send_message(
+                "❌ Failed to add keys!",
+                ephemeral=True
+            )
 
 class RemoveKeysModal(discord.ui.Modal, title="Remove Keys"):
     keys = discord.ui.TextInput(
@@ -472,11 +546,12 @@ class ArcaneGatewayModal(discord.ui.Modal):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        start_time = time.time()
+        guild_id = interaction.guild.id
+        
         try:
-            # Defer response immediately
             await interaction.response.defer(ephemeral=True)
             
-            # Show initial status
             progress_msg = await interaction.followup.send(
                 "🔮 Channeling mystical energies...",
                 ephemeral=True,
@@ -486,11 +561,13 @@ class ArcaneGatewayModal(discord.ui.Modal):
             # Clean the key input
             key = str(self.key).strip()
             if not key:
+                stats.log_claim(guild_id, success=False)
                 await progress_msg.edit(content="❌ Invalid key format!")
                 return
             
             # Check cooldown first
             if retry_after := claim_cooldown.get_retry_after(interaction):
+                stats.log_claim(guild_id, success=False)
                 await progress_msg.edit(
                     content=f"⏳ The portal is still cooling down... Try again in {retry_after:.1f}s"
                 )
@@ -505,7 +582,6 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 return
                 
             # Thread-safe key operations
-            guild_id = interaction.guild.id
             async with key_locks[guild_id]:
                 # Check role
                 role = interaction.guild.get_role(guild_config.role_id)
@@ -559,7 +635,13 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 # Final success message
                 await progress_msg.edit(content=f"✨ {formatted} ✨")
                 
+                # Calculate claim time and log success
+                claim_time = time.time() - start_time
+                stats.log_claim(guild_id, success=True, claim_time=claim_time)
+                
         except Exception as e:
+            claim_time = time.time() - start_time
+            stats.log_claim(guild_id, success=False)
             try:
                 await progress_msg.edit(content="❌ A mystical disturbance prevents this action!")
                 logging.error(f"Claim error: {str(e)}", exc_info=True)
@@ -620,23 +702,32 @@ async def setup(interaction: discord.Interaction):
 
 @bot.tree.command(name="addkey", description="Add single key")
 @app_commands.default_permissions(administrator=True)
-async def addkey(interaction: discord.Interaction, key: str):
+async def addkey(interaction: discord.Interaction, key: str, expires_in: Optional[int] = None):
+    """Add a key with optional expiry time in hours"""
     guild_id = interaction.guild.id
     if (guild_config := config.get(guild_id)) is None:
         await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
         return
 
+    # Convert hours to seconds if expiry provided
+    expiry_seconds = expires_in * 3600 if expires_in else None
+    
     # Check if key already exists
     if any(key_security.verify_key(key, h) for h in guild_config.valid_keys):
         await interaction.response.send_message("❌ Key exists!", ephemeral=True)
         return
 
-    # Store hashed key
-    hashed = key_security.hash_key(key)
+    # Store hashed key with expiry
+    hashed = key_security.hash_key(key, expiry_seconds)
     guild_config.valid_keys.add(hashed)
     await save_config()
+    stats.log_keys_added(guild_id, 1)
     await audit.log_key_add(interaction, 1)
-    await interaction.response.send_message("✅ Key added!", ephemeral=True)
+    
+    msg = "✅ Key added!"
+    if expires_in:
+        msg += f"\n• Expires in: {expires_in} hours"
+    await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="addkeys", description="Bulk add keys")
 @app_commands.default_permissions(administrator=True)
@@ -707,15 +798,24 @@ async def clearkeys(interaction: discord.Interaction):
 @bot.tree.command(name="keys", description="Check available keys (Admin only)")
 @app_commands.default_permissions(administrator=True)
 @require_setup()
-async def keys(interaction: discord.Interaction):  # Only takes interaction
-    guild_config = config[interaction.guild.id]  # Get config inside function
+async def keys(interaction: discord.Interaction):
+    guild_config = config[interaction.guild.id]
     role = interaction.guild.get_role(guild_config.role_id)
-    await interaction.response.send_message(
+    
+    # Count expired keys
+    now = time.time()
+    expired = sum(1 for h in guild_config.valid_keys 
+                 if not key_security.verify_key(str(now), h))
+    
+    msg = (
         f"🔑 **Key Status**\n"
         f"• Available keys: {len(guild_config.valid_keys)}\n"
-        f"• Target role: {role.mention if role else '❌ Role not found!'}",
-        ephemeral=True
+        f"• Expired keys: {expired}\n"
+        f"• Active keys: {len(guild_config.valid_keys) - expired}\n"
+        f"• Target role: {role.mention if role else '❌ Role not found!'}"
     )
+    
+    await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="grimoire", description="📚 Reveal the ancient tomes of knowledge")
 async def grimoire(interaction: discord.Interaction):
@@ -853,111 +953,51 @@ async def create_dynamic_command(name: str, guild_id: int):
         logging.error(f"Failed to create command /{name}: {e}")
         raise
 
-async def process_claim(interaction: discord.Interaction, key: str):
-    try:
-        # Check cooldown first (admins are exempt)
-        if retry_after := claim_cooldown.get_retry_after(interaction):
-            raise commands.CommandOnCooldown(None, retry_after, BucketType.user)
-
-        if (guild_config := config.get(interaction.guild.id)) is None:
-            raise ValueError("Server not configured")
-            
-        # Thread-safe key operations
-        guild_id = interaction.guild.id
-        async with key_locks[guild_id]:
-            # Check if user already has the role
-            role = interaction.guild.get_role(guild_config.role_id)
-            if not role:
-                raise ValueError("Role not found")
-                
-            # Verify bot can manage the role
-            if role >= interaction.guild.me.top_role:
-                raise PermissionError("Bot role too low")
-                
-            if role in interaction.user.roles:
-                raise ValueError("Already claimed")
-            
-            # Verify key with hashes
-            valid_hash = None
-            for hash_ in guild_config.valid_keys:
-                if key_security.verify_key(key, hash_):
-                    valid_hash = hash_
-                    break
-                    
-            if not valid_hash:
-                await audit.log_claim(interaction, key[:3], success=False)
-                raise ValueError("Invalid key")
-                
-            # Process claim
-            await interaction.user.add_roles(role)
-            guild_config.valid_keys.remove(valid_hash)
-            await save_config()
-            await audit.log_claim(interaction, key[:3], success=True)
-            
-            # Reset cooldown on successful claim
-            claim_cooldown.reset_cooldown(interaction)
-            
-            # Get random success message
-            template = random.choice(guild_config.success_msgs)
-            formatted = template.format(
-                user=interaction.user.mention,
-                role=role.mention,
-                key=f"`{key[:3]}...`"  # Show only first 3 chars of key
-            )
-            
-            # Since we deferred earlier, use followup
-            await interaction.followup.send(
-                f"✨ {formatted} ✨",
-                ephemeral=True
-            )
-            
-    except Exception as e:
-        await handle_claim_error(interaction, e)
-
-async def handle_claim_error(interaction: discord.Interaction, error: Exception):
-    # Add detailed error logging
-    logging.error(f"Claim Error: {str(error)}", exc_info=True)
-    
-    error_messages = {
-        ValueError: {
-            "Server not configured": "🔧 Server not configured! Use /setup first",
-            "Invalid key": "🔑 Invalid or expired key!",
-            "Role not found": "👻 Role missing - contact admin!",
-            "Already claimed": "🎭 You already have this role!"
-        },
-        PermissionError: "📛 Bot needs higher role position!",
-        commands.CommandOnCooldown: lambda e: f"⏳ Try again in {e.retry_after:.1f}s"
-    }
-    
-    # Get original error message
-    error_msg = str(error).split('\n')[0]
-    
-    if isinstance(error, ValueError):
-        message = error_messages[ValueError].get(error_msg, "❌ Validation error")
-    elif isinstance(error, PermissionError):
-        message = error_messages[PermissionError]
-    elif isinstance(error, commands.CommandOnCooldown):
-        message = error_messages[commands.CommandOnCooldown](error)
-    else:
-        message = "❌ An unexpected error occurred"
-        
-    try:
-        await interaction.response.send_message(message, ephemeral=True)
-    except discord.InteractionResponded:
-        await interaction.followup.send(message, ephemeral=True)
-
 # Add after config class
 class KeySecurity:
     @staticmethod
-    def hash_key(key: str) -> str:
-        return bcrypt_sha256.hash(key)
-    
+    def hash_key(key: str, expiry: int = None, max_uses: int = None) -> str:
+        """Hash a key with metadata stored in the hash string"""
+        metadata = {}
+        if expiry:
+            metadata['exp'] = int(time.time()) + expiry
+        if max_uses:
+            metadata['uses'] = max_uses
+        
+        # Store metadata as JSON in hash string
+        hash_str = bcrypt_sha256.hash(key)
+        return f"{hash_str}${json.dumps(metadata)}" if metadata else hash_str
+
     @staticmethod
-    def verify_key(key: str, hash_: str) -> bool:
+    def verify_key(key: str, full_hash: str, guild_config: GuildConfig = None) -> bool:
+        """Verify a key and handle metadata"""
         try:
-            return bcrypt_sha256.verify(key, hash_)
+            if '$' in full_hash:
+                hash_part, meta_part = full_hash.rsplit('$', 1)
+                metadata = json.loads(meta_part)
+                
+                # Check expiration
+                if metadata.get('exp') and metadata['exp'] < time.time():
+                    return False
+                
+                # Check and update uses
+                if 'uses' in metadata:
+                    if metadata['uses'] <= 0:
+                        return False
+                    if guild_config:
+                        metadata['uses'] -= 1
+                        new_hash = f"{hash_part}${json.dumps(metadata)}"
+                        guild_config.valid_keys.remove(full_hash)
+                        if metadata['uses'] > 0:
+                            guild_config.valid_keys.add(new_hash)
+                
+                return bcrypt_sha256.verify(key, hash_part)
+            else:
+                # Legacy hash without metadata
+                return bcrypt_sha256.verify(key, full_hash)
         except Exception:
-            return False
+            # Fallback for malformed hashes
+            return bcrypt_sha256.verify(key, full_hash)
 
 # Initialize security
 key_security = KeySecurity()
