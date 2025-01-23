@@ -10,6 +10,12 @@ from discord import app_commands
 from dotenv import load_dotenv
 from typing import Dict, Set, Optional
 import random
+from discord.ext.commands import CooldownMapping, BucketType
+from collections import defaultdict
+from threading import Lock
+from cryptography.fernet import Fernet
+import base64
+from passlib.hash import bcrypt_sha256
 
 # Configuration and logging setup
 load_dotenv()
@@ -45,6 +51,10 @@ class GuildConfig:
         self.success_msgs = success_msgs or DEFAULT_SUCCESS_MESSAGES.copy()
 
 config: Dict[int, GuildConfig] = {}
+
+RESERVED_NAMES = {'sync', 'setup', 'addkey', 'addkeys', 'removekey', 'removekeys', 'clearkeys', 'keys', 'grimoire'}
+claim_cooldown = CooldownMapping.from_cooldown(1, 300, BucketType.user)  # 5 minute cooldown
+key_locks: Dict[int, Lock] = defaultdict(Lock)
 
 async def save_config():
     async with aiofiles.open('config.json', 'w') as f:
@@ -110,6 +120,18 @@ async def on_ready():
     cleanup_task.start()
     
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    
+    # Restore guild-specific commands
+    restored = 0
+    for guild_id, guild_config in config.items():
+        try:
+            await create_dynamic_command(guild_config.command, guild_id)
+            restored += 1
+        except Exception as e:
+            logging.error(f"Failed to restore command for guild {guild_id}: {e}")
+    
+    logging.info(f"Restored {restored} custom commands")
+    
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
@@ -200,6 +222,13 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             command = str(self.command_name).lower().strip()
             
             # Validate command name
+            if command in RESERVED_NAMES:
+                await interaction.response.send_message(
+                    f"❌ '{command}' is a reserved command name!",
+                    ephemeral=True
+                )
+                return
+            
             if not command.isalnum():
                 await interaction.response.send_message(
                     "❌ Command name must be alphanumeric!",
@@ -528,14 +557,21 @@ async def create_dynamic_command(name: str, guild_id: int):
         if not guild:
             raise ValueError(f"Guild {guild_id} not found")
 
+        # Use persistent callback naming
+        cmd_name = f"dynamic_cmd_{guild_id}"
+        
         # Remove existing command if it exists
         old_command = bot.tree.get_command(name, guild=discord.Object(id=guild_id))
         if old_command:
             bot.tree.remove_command(name, guild=discord.Object(id=guild_id))
+            logging.info(f"Removed old command /{name} for guild {guild_id}")
             
         @bot.tree.command(name=name, description="🌟 Unlock your mystical powers", guild=discord.Object(id=guild_id))
-        async def dynamic_claim(interaction: discord.Interaction):
+        async def dynamic_claim_wrapper(interaction: discord.Interaction):
             await interaction.response.send_modal(ArcaneGatewayModal())
+        
+        # Store reference to prevent garbage collection
+        setattr(bot, cmd_name, dynamic_claim_wrapper)
             
         await bot.tree.sync(guild=discord.Object(id=guild_id))
         logging.info(f"Created command /{name} for guild {guild_id}")
@@ -546,41 +582,55 @@ async def create_dynamic_command(name: str, guild_id: int):
 
 async def process_claim(interaction: discord.Interaction, key: str):
     try:
+        # Check cooldown first
+        bucket = claim_cooldown.get_bucket(interaction)
+        if retry_after := bucket.update_rate_limit():
+            raise commands.CommandOnCooldown(bucket, retry_after)
+
         if (guild_config := config.get(interaction.guild.id)) is None:
             raise ValueError("Server not configured")
             
-        # Check if user already has the role
-        role = interaction.guild.get_role(guild_config.role_id)
-        if not role:
-            raise ValueError("Role not found")
+        # Thread-safe key operations
+        guild_id = interaction.guild.id
+        with key_locks[guild_id]:
+            # Check if user already has the role
+            role = interaction.guild.get_role(guild_config.role_id)
+            if not role:
+                raise ValueError("Role not found")
+                
+            if role in interaction.user.roles:
+                raise ValueError("Already claimed")
             
-        if role in interaction.user.roles:
-            raise ValueError("Already claimed")
+            # Verify key with hashes
+            valid_hash = None
+            for hash_ in guild_config.valid_keys:
+                if key_security.verify_key(key, hash_):
+                    valid_hash = hash_
+                    break
+                    
+            if not valid_hash:
+                await audit.log_claim(interaction, key[:3], success=False)
+                raise ValueError("Invalid key")
+                
+            # Process claim
+            await interaction.user.add_roles(role)
+            guild_config.valid_keys.remove(valid_hash)
+            await save_config()
+            await audit.log_claim(interaction, key[:3], success=True)
             
-        if key not in guild_config.valid_keys:
-            raise ValueError("Invalid key")
+            # Get random success message
+            template = random.choice(guild_config.success_msgs)
+            formatted = template.format(
+                user=interaction.user.mention,
+                role=role.mention,
+                key=f"`{valid_hash}`"
+            )
             
-        if role >= interaction.guild.me.top_role:
-            raise PermissionError("Bot role too low")
+            await interaction.response.send_message(
+                f"✨ {formatted} ✨",
+                ephemeral=True
+            )
             
-        # Process claim
-        await interaction.user.add_roles(role)
-        guild_config.valid_keys.remove(key)
-        await save_config()
-        
-        # Get random success message
-        template = random.choice(guild_config.success_msgs)
-        formatted = template.format(
-            user=interaction.user.mention,
-            role=role.mention,
-            key=f"`{key}`"
-        )
-        
-        await interaction.response.send_message(
-            f"✨ {formatted} ✨",
-            ephemeral=True
-        )
-        
     except Exception as e:
         await handle_claim_error(interaction, e)
 
@@ -610,6 +660,59 @@ async def handle_claim_error(interaction: discord.Interaction, error: Exception)
         await interaction.response.send_message(message, ephemeral=True)
     except discord.InteractionResponded:
         await interaction.followup.send(message, ephemeral=True)
+
+# Add after config class
+class KeySecurity:
+    @staticmethod
+    def hash_key(key: str) -> str:
+        return bcrypt_sha256.hash(key)
+    
+    @staticmethod
+    def verify_key(key: str, hash_: str) -> bool:
+        try:
+            return bcrypt_sha256.verify(key, hash_)
+        except Exception:
+            return False
+
+# Initialize security
+key_security = KeySecurity()
+
+# Add after imports
+class AuditLogger:
+    def __init__(self):
+        self.logger = logging.getLogger('audit')
+        self.logger.setLevel(logging.INFO)
+        
+        # File handler
+        handler = logging.FileHandler('audit.log')
+        handler.setFormatter(
+            logging.Formatter('%(asctime)s | %(message)s')
+        )
+        self.logger.addHandler(handler)
+    
+    async def log_claim(self, interaction: discord.Interaction, key: str, success: bool):
+        self.logger.info(
+            f"CLAIM | User: {interaction.user} ({interaction.user.id}) | "
+            f"Guild: {interaction.guild.name} ({interaction.guild.id}) | "
+            f"Key: {key[:3]}... | Success: {success}"
+        )
+    
+    async def log_key_add(self, interaction: discord.Interaction, count: int):
+        self.logger.info(
+            f"ADD_KEYS | Admin: {interaction.user} ({interaction.user.id}) | "
+            f"Guild: {interaction.guild.name} ({interaction.guild.id}) | "
+            f"Count: {count}"
+        )
+    
+    async def log_key_remove(self, interaction: discord.Interaction, count: int):
+        self.logger.info(
+            f"REMOVE_KEYS | Admin: {interaction.user} ({interaction.user.id}) | "
+            f"Guild: {interaction.guild.name} ({interaction.guild.id}) | "
+            f"Count: {count}"
+        )
+
+# Initialize logger
+audit = AuditLogger()
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
