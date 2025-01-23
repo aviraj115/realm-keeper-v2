@@ -351,9 +351,9 @@ def require_setup():
             if (guild_config := config.get(interaction.guild.id)) is None:
                 await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
                 return
-            # Don't pass guild_config, let the function get it if needed
-            return await func(interaction)  # Remove guild_config parameter
-        return decorator
+            return await func(interaction)
+        wrapper.__name__ = func.__name__  # Preserve function name
+        return wrapper  # Return wrapper instead of decorator
     return decorator
 
 # Commands
