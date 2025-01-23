@@ -746,10 +746,11 @@ async def process_claim(interaction: discord.Interaction, key: str):
             formatted = template.format(
                 user=interaction.user.mention,
                 role=role.mention,
-                key=f"`{valid_hash}`"
+                key=f"`{key[:3]}...`"  # Show only first 3 chars of key
             )
             
-            await interaction.response.send_message(
+            # Since we deferred earlier, use followup
+            await interaction.followup.send(
                 f"✨ {formatted} ✨",
                 ephemeral=True
             )
