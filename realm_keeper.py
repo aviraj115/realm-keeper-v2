@@ -180,14 +180,14 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     )
     
     success_message = discord.ui.TextInput(
-        label="Success Messages (one per line, empty=default)",
+        label="Success Messages (one per line)",
         placeholder="✨ {user} unlocked {role}!\n🌟 {user} joined {role}!",
         style=discord.TextStyle.long,
         required=False
     )
     
     initial_keys = discord.ui.TextInput(
-        label="Initial Keys (one per line, optional)",
+        label="Initial Keys (one per line)",
         style=discord.TextStyle.long,
         placeholder="key1\nkey2\nkey3",
         required=False
