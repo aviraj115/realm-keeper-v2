@@ -168,53 +168,60 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        guild_id = str(interaction.guild.id)
-        role_name = str(self.role_name)
-        command = str(self.command_name).lower().strip()
-        success_template = str(self.success_message)
-        
-        # Validate command name
-        if not command.isalnum():
-            await interaction.response.send_message(
-                "❌ Command name must be alphanumeric!",
-                ephemeral=True
-            )
-            return
-        
-        # Find role
-        roles = [r for r in interaction.guild.roles if r.name == role_name]
-        if len(roles) > 1:
-            await interaction.response.send_message(
-                "❌ Multiple roles with this name exist!",
-                ephemeral=True
-            )
-            return
-        
-        if not roles:
-            await interaction.response.send_message(
-                "❌ Role not found! Create it first.",
-                ephemeral=True
-            )
-            return
+        try:
+            guild_id = str(interaction.guild.id)
+            role_name = str(self.role_name)
+            command = str(self.command_name).lower().strip()
+            success_template = str(self.success_message)
+            
+            # Validate command name
+            if not command.isalnum():
+                await interaction.response.send_message(
+                    "❌ Command name must be alphanumeric!",
+                    ephemeral=True
+                )
+                return
+            
+            # Find role
+            roles = [r for r in interaction.guild.roles if r.name == role_name]
+            if len(roles) > 1:
+                await interaction.response.send_message(
+                    "❌ Multiple roles with this name exist!",
+                    ephemeral=True
+                )
+                return
+            
+            if not roles:
+                await interaction.response.send_message(
+                    "❌ Role not found! Create it first.",
+                    ephemeral=True
+                )
+                return
 
-        # Store configuration
-        config[guild_id] = GuildConfig(
-            roles[0].id,
-            set(),
-            command,
-            success_template
-        )
-        await save_config()
-        
-        # Create dynamic command
-        create_dynamic_command(command)
-        
-        await interaction.response.send_message(
-            f"🔮 Configuration complete!\n"
-            f"- Activation command: `/{command}`\n"
-            f"- Success template: `{success_template}`",
-            ephemeral=True
-        )
+            # Store configuration
+            config[guild_id] = GuildConfig(
+                roles[0].id,
+                set(),
+                command,
+                success_template
+            )
+            await save_config()
+            
+            # Create dynamic command
+            create_dynamic_command(command)
+            await bot.tree.sync()  # Sync the new command
+            
+            await interaction.response.send_message(
+                f"🔮 Configuration complete!\n"
+                f"- Activation command: `/{command}`\n"
+                f"- Success template: `{success_template}`",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Setup failed: {str(e)}",
+                ephemeral=True
+            )
 
 class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
     keys = discord.ui.TextInput(
@@ -476,6 +483,15 @@ async def process_claim(interaction: discord.Interaction, key: str):
         await handle_claim_error(interaction, e)
 
 def create_dynamic_command(name: str):
+    # Remove existing command if it exists
+    try:
+        existing = bot.tree.get_command(name)
+        if existing:
+            bot.tree.remove_command(name)
+            logging.info(f"Removed existing command /{name}")
+    except:
+        pass
+        
     @bot.tree.command(name=name, description="Unlock your mystical powers")
     @app_commands.describe(key="The ancient secret phrase")
     async def dynamic_claim(interaction: discord.Interaction, key: str):
@@ -483,6 +499,7 @@ def create_dynamic_command(name: str):
         
     # Update command tree
     bot.tree.add_command(dynamic_claim)
+    logging.info(f"Created dynamic command /{name}")
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
