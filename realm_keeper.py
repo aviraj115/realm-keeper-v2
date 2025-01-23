@@ -180,7 +180,7 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     )
     
     success_message = discord.ui.TextInput(
-        label="Success Message Template (or leave empty for random)",
+        label="Success Message (empty for random)",
         placeholder="{user} has unlocked the {role}!",
         style=discord.TextStyle.long,
         required=False
