@@ -53,30 +53,28 @@ class GuildConfig:
         self.command = command
         self.success_msgs = success_msgs or DEFAULT_SUCCESS_MESSAGES.copy()
         
-        # Initialize quick lookup
-        for h in valid_keys:
-            quick_hash = hashlib.sha256(h.encode()).hexdigest()[:8]
-            self.quick_lookup[quick_hash].add(h)
+        # Initialize quick lookup with key prefix instead of hash prefix
+        for full_hash in valid_keys:
+            if KeySecurity.DELIMITER in full_hash:
+                hash_part = full_hash.split(KeySecurity.DELIMITER)[0]
+            else:
+                hash_part = full_hash
+            # Store by bcrypt hash prefix for quicker matching
+            self.quick_lookup[hash_part[:7]].add(full_hash)
     
     async def add_key(self, full_hash: str, guild_id: int):
-        """Add a key with cache invalidation and warmup"""
+        """Add a key with cache invalidation"""
         self.main_store.add(full_hash)
-        quick_hash = hashlib.sha256(full_hash.encode()).hexdigest()[:8]
-        self.quick_lookup[quick_hash].add(full_hash)
-        
-        # Invalidate and rewarm cache
+        hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
+        self.quick_lookup[hash_part[:7]].add(full_hash)
         await key_cache.invalidate(guild_id)
-        await key_cache.warm_cache(guild_id, self)
     
     async def remove_key(self, full_hash: str, guild_id: int):
-        """Remove a key with cache invalidation and warmup"""
+        """Remove a key with cache invalidation"""
         self.main_store.discard(full_hash)
-        quick_hash = hashlib.sha256(full_hash.encode()).hexdigest()[:8]
-        self.quick_lookup[quick_hash].discard(full_hash)
-        
-        # Invalidate and rewarm cache
+        hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
+        self.quick_lookup[hash_part[:7]].discard(full_hash)
         await key_cache.invalidate(guild_id)
-        await key_cache.warm_cache(guild_id, self)
     
     async def bulk_add_keys(self, hashes: Set[str], guild_id: int):
         """Add multiple keys with single cache update"""
@@ -577,18 +575,10 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 await progress_msg.edit(content="❌ Invalid key format!")
                 return
 
-            # Use quick lookup to find potential matches
-            quick_hash = hashlib.sha256(key_value.encode()).hexdigest()[:8]
-            possible_hashes = guild_config.quick_lookup.get(quick_hash, set())
-            
-            if not possible_hashes:
-                await progress_msg.edit(content="❌ Invalid key or already claimed!")
-                return
-
             # Verify and process key
             async with key_locks[guild_id][get_shard(user.id)]:
-                # Try each potential match
-                for full_hash in possible_hashes:
+                # Try direct verification first
+                for full_hash in guild_config.main_store:
                     is_valid, updated_hash = KeySecurity.verify_key(key_value, full_hash)
                     if is_valid:
                         # Remove old hash
