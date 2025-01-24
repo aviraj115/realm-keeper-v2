@@ -256,16 +256,28 @@ async def load_config():
         config = {}
 
 async def create_dynamic_command(command_name: str, guild_id: int):
+    """Create a dynamic claim command for a guild"""
     guild = bot.get_guild(guild_id)
     if not guild:
         return
 
-    @app_commands.command(name=command_name, description="Claim your role with a key")
-    @app_commands.describe(key="Your mystical key")
-    async def dynamic_claim(interaction: discord.Interaction, key: str):
-        await interaction.response.send_modal(ArcaneGatewayModal(key))
+    # Remove existing command if it exists
+    try:
+        existing = bot.tree.get_command(command_name, guild=guild)
+        if existing:
+            bot.tree.remove_command(command_name, guild=guild)
+    except:
+        pass
+
+    @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
+    async def dynamic_claim(interaction: discord.Interaction):
+        """Dynamic claim command"""
+        if interaction.guild_id != guild_id:
+            return
+        await interaction.response.send_modal(ArcaneGatewayModal())
 
     bot.tree.add_command(dynamic_claim, guild=guild)
+    await bot.tree.sync(guild=guild)
 
 async def sync_commands():
     try:
@@ -517,14 +529,17 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
             await create_dynamic_command(command, guild_id)
             
             await progress_msg.edit(content=(
-                f"✅ Setup complete!\n• Command: `/{command}`\n• Success messages: {len(success_msgs) or len(DEFAULT_SUCCESS_MESSAGES)}\n• Initial keys: {len(initial_key_set)}"
+                f"✅ Setup complete!\n• Command: `/{command}`\n"
+                f"• Success messages: {len(success_msgs) or len(DEFAULT_SUCCESS_MESSAGES)}\n"
+                f"• Initial keys: {len(initial_key_set)}"
             ))
             
         except Exception as e:
+            logging.error(f"Setup error: {str(e)}")
             try:
                 await progress_msg.edit(content=f"❌ Setup failed: {str(e)}")
             except Exception:
-                logging.error(f"Failed to send setup error message: {str(e)}", exc_info=True)
+                pass
 
 class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
     key = discord.ui.TextInput(
