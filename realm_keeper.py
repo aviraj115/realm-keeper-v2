@@ -5,14 +5,16 @@ import time
 import uuid
 import logging
 import asyncio
+import random
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
-from typing import Optional, Set, Dict
+from typing import Optional, Set, Dict, List
 
 # Discord
 import discord
-from discord import app_commands
+from discord import app_commands, HTTPException, GatewayNotFound
 from discord.ext import commands, tasks
+from discord.ext.commands import Cooldown, BucketType
 
 # Third-party
 import mmh3
@@ -25,7 +27,8 @@ from pybloom_live import ScalableBloomFilter
 import base64
 import secrets
 import psutil
-import aiofiles  # For async file operations
+import aiofiles
+import sys
 
 # Initialize logging
 logging.basicConfig(
@@ -1027,6 +1030,7 @@ class RealmKeeper(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
+    
     keys = discord.ui.TextInput(
         label="Enter keys to remove (one per line)",
         style=discord.TextStyle.long,
