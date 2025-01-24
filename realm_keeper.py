@@ -862,10 +862,20 @@ async def create_dynamic_command(command_name: str, guild_id: int, client: disco
             """Dynamic claim command"""
             if interaction.guild_id != guild_id:
                 return
-                
-            # Create and send modal
-            modal = ArcaneGatewayModal()
-            await interaction.response.send_modal(modal)
+            
+            try:
+                # Create and send modal
+                modal = ArcaneGatewayModal()
+                await interaction.response.send_modal(modal)
+            except Exception as e:
+                logging.error(f"Modal error in {guild_id}: {e}")
+                try:
+                    await interaction.response.send_message(
+                        "❌ Failed to open claim window!", 
+                        ephemeral=True
+                    )
+                except:
+                    pass
 
         # Remove existing command if it exists
         try:
@@ -1846,9 +1856,9 @@ class KeyLocks:
 # Initialize lock manager
 key_locks = KeyLocks()
 
-class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
+class ArcaneGatewayModal(discord.ui.Modal):
     def __init__(self):
-        super().__init__(title="🔮 Mystical Gateway", timeout=None)
+        super().__init__(title="🔮 Mystical Gateway")
         self.add_item(discord.ui.TextInput(
             label="✨ Present Your Arcane Key",
             placeholder="Inscribe your mystical key (format: xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx)",
@@ -1879,10 +1889,15 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 )
                 return
 
-            # Check if user already has the role
-            if role in interaction.user.roles:
+            # Validate and normalize key format
+            key_value = self.children[0].value.strip().lower()
+            try:
+                uuid_obj = uuid.UUID(key_value, version=4)
+                if str(uuid_obj) != key_value:
+                    raise ValueError()
+            except ValueError:
                 await interaction.followup.send(
-                    "🎭 You have already been blessed with the powers of this role!", 
+                    "📜 This key's pattern is foreign to our mystic tomes...", 
                     ephemeral=True
                 )
                 return
@@ -1898,19 +1913,6 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                         ephemeral=True
                     )
                     return
-
-            # Validate and normalize key format
-            key_value = self.children[0].value.strip().lower()
-            try:
-                uuid_obj = uuid.UUID(key_value, version=4)
-                if str(uuid_obj) != key_value:
-                    raise ValueError()
-            except ValueError:
-                await interaction.followup.send(
-                    "📜 This key's pattern is foreign to our mystic tomes...", 
-                    ephemeral=True
-                )
-                return
 
             # Generate hash for the key
             key_hash = KeySecurity.hash_key(key_value)
