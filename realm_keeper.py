@@ -1261,7 +1261,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
             for key in valid_keys:
                 found = False
                 for full_hash in list(guild_config.main_store):
-                    if KeySecurity.verify_key(key, full_hash)[0]:
+                    if (await KeySecurity.verify_key(key, full_hash))[0]:
                         await guild_config.remove_key(full_hash, guild_id)
                         removed += 1
                         found = True
@@ -1334,7 +1334,7 @@ async def before_cleanup():
 class KeySecurity:
     DELIMITER = "||"
     HASH_PREFIX_LENGTH = 7
-    HASH_ROUNDS = 10
+    HASH_ROUNDS = 5  # Reduced from 10 for better performance
     _salt = None
     _metrics = defaultdict(lambda: {
         'hashes': 0,
@@ -1342,6 +1342,12 @@ class KeySecurity:
         'failures': 0,
         'avg_verify_time': 0.0
     })
+    
+    # Cache for recently verified keys
+    _verify_cache = {}
+    _cache_lock = asyncio.Lock()
+    _max_cache_size = 1000
+    _cache_ttl = 300  # 5 minutes
     
     @classmethod
     def _get_salt(cls) -> bytes:
@@ -1367,6 +1373,48 @@ class KeySecurity:
         return cls._salt
     
     @classmethod
+    def _verify_in_thread(cls, key: str, hash_str: str) -> bool:
+        """Run bcrypt verification in thread"""
+        try:
+            salted_key = f"{key}{cls._get_salt().hex()}"
+            return bcrypt_sha256.verify(salted_key, hash_str)
+        except Exception:
+            return False
+    
+    @classmethod
+    async def _cache_lookup(cls, key: str, hash_str: str) -> Optional[bool]:
+        """Check cache for previous verification result"""
+        async with cls._cache_lock:
+            cache_key = f"{key}:{hash_str}"
+            if cache_key in cls._verify_cache:
+                result, timestamp = cls._verify_cache[cache_key]
+                if time.time() - timestamp <= cls._cache_ttl:
+                    return result
+                else:
+                    del cls._verify_cache[cache_key]
+            return None
+    
+    @classmethod
+    async def _cache_store(cls, key: str, hash_str: str, result: bool):
+        """Store verification result in cache"""
+        async with cls._cache_lock:
+            # Clean old entries if cache is full
+            if len(cls._verify_cache) >= cls._max_cache_size:
+                now = time.time()
+                cls._verify_cache = {
+                    k: v for k, v in cls._verify_cache.items()
+                    if now - v[1] <= cls._cache_ttl
+                }
+                
+                # If still full, remove oldest entries
+                if len(cls._verify_cache) >= cls._max_cache_size:
+                    sorted_items = sorted(cls._verify_cache.items(), key=lambda x: x[1][1])
+                    cls._verify_cache = dict(sorted_items[len(sorted_items)//2:])
+            
+            cache_key = f"{key}:{hash_str}"
+            cls._verify_cache[cache_key] = (result, time.time())
+    
+    @classmethod
     def hash_key(cls, key: str, expiry_seconds: Optional[int] = None) -> str:
         """Hash a key with metadata"""
         try:
@@ -1389,7 +1437,7 @@ class KeySecurity:
             raise
     
     @classmethod
-    def verify_key(cls, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
+    async def verify_key(cls, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
         """Verify a key against a hash, returns (is_valid, updated_hash)"""
         try:
             # Split hash and metadata
@@ -1404,15 +1452,23 @@ class KeySecurity:
                 except json.JSONDecodeError:
                     return False, None
             
-            # Verify hash
-            salted_key = f"{key}{cls._get_salt().hex()}"
-            try:
-                if bcrypt_sha256.verify(salted_key, hash_str):
-                    return True, full_hash
-            except ValueError:
-                pass
+            # Check cache first
+            if cached_result := await cls._cache_lookup(key, hash_str):
+                return cached_result, full_hash
             
-            return False, None
+            # Verify in thread pool
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                worker_pool.pool,
+                cls._verify_in_thread,
+                key,
+                hash_str
+            )
+            
+            # Cache result
+            await cls._cache_store(key, hash_str, result)
+            
+            return (result, full_hash) if result else (False, None)
             
         except Exception as e:
             logging.error(f"Verification error: {str(e)}")
@@ -1633,7 +1689,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
             # Check if key exists and is valid
             key_found = False
             for full_hash in list(guild_config.main_store):
-                valid, _ = KeySecurity.verify_key(key_value, full_hash)
+                valid, _ = await KeySecurity.verify_key(key_value, full_hash)
                 if valid:
                     key_found = True
                     # Remove key and grant role
@@ -1836,7 +1892,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 # Check if key already exists
                 exists = False
                 for full_hash in list(guild_config.main_store):
-                    if KeySecurity.verify_key(key, full_hash)[0]:
+                    if (await KeySecurity.verify_key(key, full_hash))[0]:
                         duplicates.append(key)
                         exists = True
                         break
