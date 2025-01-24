@@ -9,6 +9,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from typing import Optional, Set, Dict, List
+import threading
 
 # Discord
 import discord
@@ -60,29 +61,52 @@ HTTP_TIMEOUT = ClientTimeout(total=30, connect=10)
 MAX_RETRIES = 3
 MAX_CONNECTIONS = 100
 
-# Initialize worker pool
 class AdaptiveWorkerPool:
-    def __init__(self, min_workers: int = 4, max_workers: int = 32):
+    """Thread pool that scales based on load"""
+    def __init__(self, min_workers=4, max_workers=16):
         self.min_workers = min_workers
         self.max_workers = max_workers
         self.pool = ThreadPoolExecutor(
             max_workers=min_workers,
             thread_name_prefix="worker"
         )
-        
+        self._lock = threading.Lock()
+    
+    def submit(self, fn, *args, **kwargs):
+        """Submit task to pool"""
+        return self.pool.submit(fn, *args, **kwargs)
+    
     def scale_up(self):
-        """Increase worker count"""
-        current = len(self.pool._threads)
-        if current < self.max_workers:
-            new_size = min(current + 2, self.max_workers)
-            self.pool._max_workers = new_size
-            
+        """Add workers if below max"""
+        with self._lock:
+            current = len(self.pool._threads)
+            if current < self.max_workers:
+                new_size = min(current + 2, self.max_workers)
+                self._resize(new_size)
+                logging.info(f"Scaled up workers to {new_size}")
+    
     def scale_down(self):
-        """Decrease worker count"""
-        current = len(self.pool._threads)
-        if current > self.min_workers:
-            new_size = max(current - 1, self.min_workers)
-            self.pool._max_workers = new_size
+        """Remove workers if above min"""
+        with self._lock:
+            current = len(self.pool._threads)
+            if current > self.min_workers:
+                new_size = max(current - 1, self.min_workers)
+                self._resize(new_size)
+                logging.info(f"Scaled down workers to {new_size}")
+    
+    def _resize(self, new_size: int):
+        """Resize pool to target size"""
+        old_pool = self.pool
+        self.pool = ThreadPoolExecutor(
+            max_workers=new_size,
+            thread_name_prefix="worker"
+        )
+        old_pool.shutdown(wait=False)
+    
+    def shutdown(self):
+        """Shutdown pool"""
+        if self.pool:
+            self.pool.shutdown(wait=True)
 
 # Initialize worker pool
 worker_pool = AdaptiveWorkerPool()
@@ -714,11 +738,21 @@ def admin_cooldown():
 class RealmKeeper(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.worker_pool = AdaptiveWorkerPool()
+        self.worker_pool = AdaptiveWorkerPool(
+            min_workers=4,
+            max_workers=16
+        )
         self.key_security = KeySecurity()
         self.monitor_task = None
         self.command_sync = CommandSync(self.bot)
 
+    async def cog_unload(self):
+        """Cleanup when cog is unloaded"""
+        if self.worker_pool:
+            self.worker_pool.shutdown()
+        if self.monitor_task:
+            self.monitor_task.cancel()
+    
     @commands.Cog.listener()
     async def on_ready(self):
         """Initialize bot systems with monitoring"""
@@ -739,8 +773,8 @@ class RealmKeeper(commands.Cog):
             fake_key = str(uuid.uuid4())
             for _ in range(4):
                 await asyncio.get_event_loop().run_in_executor(
-                    self.worker_pool,
-                    self.key_security.hash_key,  # Use instance method
+                    self.worker_pool.pool,  # Use the actual ThreadPoolExecutor
+                    self.key_security.hash_key,
                     fake_key
                 )
             
