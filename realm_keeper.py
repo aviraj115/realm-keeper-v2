@@ -1914,34 +1914,10 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 )
                 return
 
-            # Try to find a matching key
-            key_found = False
-            valid_hash = None
-            
-            # Make a copy of the keys to avoid modification during iteration
-            stored_keys = list(guild_config.main_store)
-            
-            # Try each stored hash
-            for stored_hash in stored_keys:
-                try:
-                    # First try direct string comparison
-                    if stored_hash == key_value:
-                        key_found = True
-                        valid_hash = stored_hash
-                        break
-                        
-                    # Then try verifying the key
-                    if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
-                        key_found = True
-                        valid_hash = stored_hash
-                        break
-                except Exception as e:
-                    logging.error(f"Key verification error: {e}")
-                    continue
-
-            if key_found and valid_hash:
+            # Direct key lookup
+            if key_value in guild_config.main_store:
                 # Remove key and grant role
-                await guild_config.remove_key(valid_hash, guild_id)
+                guild_config.main_store.remove(key_value)
                 await interaction.client.config.save()
                 
                 try:
@@ -2112,15 +2088,14 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 chunk = key_list[start_idx:end_idx]
                 
                 # Process chunk
-                chunk_hashes = {}
-                
-                # Validate format and pre-compute hashes
                 for key in chunk:
                     try:
                         uuid_obj = uuid.UUID(key, version=4)
                         if str(uuid_obj) == key.lower():
-                            # Store the normalized key directly
-                            await guild_config.add_key(key.lower(), guild_id)
+                            # Store normalized key directly
+                            key_lower = key.lower()
+                            guild_config.main_store.add(key_lower)
+                            guild_config.bloom.add(key_lower)
                             added += 1
                         else:
                             invalid += 1
