@@ -775,6 +775,29 @@ class Stats:
             'last_claim': 0
         })
         self.load_stats()
+    
+    async def save_stats(self):
+        """Save stats to file"""
+        try:
+            async with aiofiles.open('stats.json', 'w') as f:
+                await f.write(json.dumps({
+                    str(guild_id): stats 
+                    for guild_id, stats in self.guild_stats.items()
+                }, indent=4))
+        except Exception as e:
+            logging.error(f"Failed to save stats: {str(e)}")
+    
+    def load_stats(self):
+        """Load stats from file"""
+        try:
+            with open('stats.json', 'r') as f:
+                data = json.loads(f.read())
+                for guild_id, stats in data.items():
+                    self.guild_stats[int(guild_id)].update(stats)
+        except FileNotFoundError:
+            pass  # No stats file yet
+        except Exception as e:
+            logging.error(f"Failed to load stats: {str(e)}")
 
     def log_claim(self, guild_id: int, success: bool, time_taken: float = None):
         """Log a claim attempt with timing"""
