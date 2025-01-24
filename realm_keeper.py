@@ -452,88 +452,76 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
-            progress_msg = await interaction.followup.send("🔮 Setting up your realm...", ephemeral=True, wait=True)
-            
-            guild_id = interaction.guild.id
-            role_name = str(self.role_name)
-            command = str(self.command_name).lower().strip()
-            
-            if command in RESERVED_NAMES:
-                await progress_msg.edit(content="❌ That command name is reserved!")
-                return
-            
-            if not command.isalnum():
-                await progress_msg.edit(content="❌ Command name must be alphanumeric!")
-                return
-            
-            await progress_msg.edit(content="🔍 Validating role...")
-            roles = [r for r in interaction.guild.roles if r.name == role_name]
-            
-            if len(roles) > 1:
-                await progress_msg.edit(content="❌ Multiple roles with this name exist!")
-                return
-            
-            if not roles:
+            progress_msg = await interaction.followup.send(
+                "⚙️ Setting up...", 
+                ephemeral=True,
+                wait=True
+            )
+
+            # Validate role
+            role = discord.utils.get(interaction.guild.roles, name=self.role_name.value)
+            if not role:
                 await progress_msg.edit(content="❌ Role not found! Create it first.")
                 return
-                
-            target_role = roles[0]
-            bot_role = interaction.guild.me.top_role
-            
-            if target_role >= bot_role:
-                await progress_msg.edit(
-                    content=f"❌ Bot's role must be higher than the target role!\n• Bot's highest role: {bot_role.mention}\n• Target role: {target_role.mention}"
-                )
-                return
-                
-            if not interaction.user.guild_permissions.administrator and target_role >= interaction.user.top_role:
-                await progress_msg.edit(content="❌ Your highest role must be above the target role!")
-            return
 
-            await progress_msg.edit(content="📝 Processing configuration...")
+            # Validate command name
+            command = self.command_name.value.lower().strip()
+            if not command or command in RESERVED_NAMES:
+                await progress_msg.edit(content="❌ Invalid command name!")
+                return
+
+            # Process success messages
             success_msgs = []
-            if self.success_message.value:
-                success_msgs = [msg.strip() for msg in self.success_message.value.split("\n") if msg.strip()]
-            
+            if self.success_message.value.strip():
+                success_msgs = [
+                    msg.strip() for msg in self.success_message.value.split('\n')
+                    if msg.strip()
+                ]
+
+            # Process initial keys
             initial_key_set = set()
-            if self.initial_keys.value:
-                key_list = [k.strip() for k in self.initial_keys.value.split("\n") if k.strip()]
-                for key in key_list:
+            if self.initial_keys.value.strip():
+                await progress_msg.edit(content="🔑 Validating keys...")
+                for key in self.initial_keys.value.split('\n'):
+                    key = key.strip()
+                    if not key:
+                        continue
                     try:
                         uuid_obj = uuid.UUID(key, version=4)
-                        if str(uuid_obj) == key.lower():
-                            initial_key_set.add(KeySecurity.hash_key(key))
+                        if str(uuid_obj) != key.lower():
+                            raise ValueError()
+                        initial_key_set.add(KeySecurity.hash_key(key))
                     except ValueError:
-                        await progress_msg.edit(content=f"❌ Invalid UUID format: {key[:8]}...\nKeys must be UUIDv4 format!")
+                        await progress_msg.edit(
+                            content=f"❌ Invalid key format: {key[:8]}...\nKeys must be UUIDv4!"
+                        )
                         return
-            
+
+            # Create config
+            guild_id = interaction.guild.id
             config[guild_id] = GuildConfig(
-                target_role.id,
+                role.id,
                 initial_key_set,
                 command,
-                success_msgs
+                success_msgs if success_msgs else None
             )
-            await save_config()
-            
-            if initial_key_set:
-                stats.log_keys_added(guild_id, len(initial_key_set))
-                await audit.log_key_add(interaction, len(initial_key_set))
-            
+
             await progress_msg.edit(content="⚡ Creating command...")
             await create_dynamic_command(command, guild_id)
-            
+            await save_config()
+
             await progress_msg.edit(content=(
                 f"✅ Setup complete!\n• Command: `/{command}`\n"
                 f"• Success messages: {len(success_msgs) or len(DEFAULT_SUCCESS_MESSAGES)}\n"
                 f"• Initial keys: {len(initial_key_set)}"
             ))
-            
+
         except Exception as e:
             logging.error(f"Setup error: {str(e)}")
             try:
                 await progress_msg.edit(content=f"❌ Setup failed: {str(e)}")
-            except Exception:
-                pass
+            except:
+                await interaction.followup.send("❌ Setup failed!", ephemeral=True)
 
 class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
     key = discord.ui.TextInput(
