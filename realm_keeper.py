@@ -809,6 +809,216 @@ async def addkey(interaction: discord.Interaction, key: str, expires_in: Optiona
         msg += f"\n• Expires in: {expires_in} hours"
     await interaction.response.send_message(msg, ephemeral=True)
 
+@bot.tree.command(name="setup", description="🔧 Configure the bot for your server")
+@app_commands.default_permissions(administrator=True)
+async def setup(interaction: discord.Interaction):
+    """Initial bot setup for a server"""
+    await interaction.response.send_modal(SetupModal())
+
+@bot.tree.command(name="addkeys", description="📥 Add multiple keys at once")
+@app_commands.default_permissions(administrator=True)
+async def addkeys(interaction: discord.Interaction):
+    """Add multiple keys in bulk"""
+    await interaction.response.send_modal(BulkKeysModal())
+
+@bot.tree.command(name="keys", description="📊 View key statistics")
+@app_commands.default_permissions(administrator=True)
+async def keys(interaction: discord.Interaction):
+    """View key statistics for the server"""
+    guild_id = interaction.guild.id
+    if (guild_config := config.get(guild_id)) is None:
+        await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+        return
+        
+    total_keys = len(guild_config.main_store)
+    expired = sum(1 for h in guild_config.main_store 
+                 if KeySecurity.DELIMITER in h and 
+                 json.loads(h.split(KeySecurity.DELIMITER)[1]).get('exp', 0) < time.time())
+    
+    guild_stats = stats.stats[guild_id]
+    embed = discord.Embed(
+        title="🔑 Key Statistics",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="Keys",
+        value=f"• Total: {total_keys}\n• Expired: {expired}\n• Added: {guild_stats['keys_added']}"
+    )
+    embed.add_field(
+        name="Claims",
+        value=f"• Total: {guild_stats['total_claims']}\n• Successful: {guild_stats['successful_claims']}\n• Failed: {guild_stats['failed_claims']}"
+    )
+    if guild_stats['claim_count'] > 0:
+        avg_time = guild_stats['total_claim_time'] / guild_stats['claim_count']
+        embed.add_field(
+            name="Timing",
+            value=f"• Average: {avg_time:.2f}s\n• Fastest: {guild_stats['fastest_claim']:.2f}s\n• Slowest: {guild_stats['slowest_claim']:.2f}s"
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="clearkeys", description="🗑️ Remove all keys")
+@app_commands.default_permissions(administrator=True)
+async def clearkeys(interaction: discord.Interaction):
+    """Remove all keys from the server"""
+    guild_id = interaction.guild.id
+    if (guild_config := config.get(guild_id)) is None:
+        await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+        return
+        
+    key_count = len(guild_config.main_store)
+    guild_config.main_store.clear()
+    guild_config.quick_lookup.clear()
+    await key_cache.invalidate(guild_id)
+    await save_config()
+    
+    await interaction.response.send_message(
+        f"✅ Cleared {key_count} keys!",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="removekey", description="🗑️ Remove a specific key")
+@app_commands.default_permissions(administrator=True)
+async def removekey(interaction: discord.Interaction, key: str):
+    """Remove a specific key"""
+    guild_id = interaction.guild.id
+    if (guild_config := config.get(guild_id)) is None:
+        await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+        return
+
+    # Validate UUID format
+    try:
+        uuid_obj = uuid.UUID(key, version=4)
+        if str(uuid_obj) != key.lower():
+            raise ValueError("Not a valid UUIDv4")
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid UUID format!", ephemeral=True)
+        return
+
+    # Find and remove key
+    removed = False
+    for full_hash in list(guild_config.main_store):
+        if key_security.verify_key(key, full_hash):
+            await guild_config.remove_key(full_hash, guild_id)
+            removed = True
+            break
+
+    if removed:
+        await save_config()
+        await interaction.response.send_message("✅ Key removed!", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Key not found!", ephemeral=True)
+
+@bot.tree.command(name="removekeys", description="🗑️ Remove multiple keys")
+@app_commands.default_permissions(administrator=True)
+async def removekeys(interaction: discord.Interaction):
+    """Remove multiple keys"""
+    await interaction.response.send_modal(RemoveKeysModal())
+
+@bot.tree.command(name="sync", description="🔄 Force sync commands")
+@app_commands.default_permissions(administrator=True)
+async def sync_guild_commands(interaction: discord.Interaction):
+    """Force sync commands with this guild"""
+    try:
+        await interaction.response.defer(ephemeral=True)
+        bot.tree.copy_global_to(guild=interaction.guild)
+        await bot.tree.sync(guild=interaction.guild)
+        await interaction.followup.send("✅ Commands synced!", ephemeral=True)
+    except Exception as e:
+        logging.error(f"Sync error: {str(e)}")
+        await interaction.followup.send("❌ Sync failed!", ephemeral=True)
+
+@bot.tree.command(name="grimoire", description="📚 View command documentation")
+async def grimoire(interaction: discord.Interaction):
+    """View detailed command documentation"""
+    embed = discord.Embed(
+        title="📚 Realm Keeper's Grimoire",
+        description="A guide to the mystical arts",
+        color=discord.Color.purple()
+    )
+    
+    # Admin commands
+    admin = (
+        "`/setup` - Configure the bot for your server\n"
+        "`/addkey` - Add a single key\n"
+        "`/addkeys` - Add multiple keys at once\n"
+        "`/removekey` - Remove a specific key\n"
+        "`/removekeys` - Remove multiple keys\n"
+        "`/clearkeys` - Remove all keys\n"
+        "`/keys` - View key statistics\n"
+        "`/sync` - Force sync commands\n"
+        "`/metrics` - View performance metrics"
+    )
+    embed.add_field(name="🔧 Admin Commands", value=admin, inline=False)
+    
+    # User commands
+    if (guild_config := config.get(interaction.guild.id)):
+        user = f"`/{guild_config.command}` - Claim your role with a key"
+        embed.add_field(name="✨ User Commands", value=user, inline=False)
+    
+    # Usage examples
+    examples = (
+        "• `/setup` - First time setup\n"
+        "• `/addkey <uuid> [expires_in]` - Add key with optional expiry\n"
+        "• `/addkeys` - Bulk add keys\n"
+        f"• `/{config.get(interaction.guild.id, GuildConfig(0, set())).command} <key>` - Claim role"
+    )
+    embed.add_field(name="📝 Examples", value=examples, inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
+    keys = discord.ui.TextInput(
+        label="Enter keys to remove (one per line)",
+        style=discord.TextStyle.long,
+        placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+        required=True,
+        max_length=2000
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            guild_id = interaction.guild.id
+            if (guild_config := config.get(guild_id)) is None:
+                await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+                return
+
+            # Validate all keys first
+            key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
+            for key in key_list:
+                try:
+                    uuid_obj = uuid.UUID(key, version=4)
+                    if str(uuid_obj) != key.lower():
+                        raise ValueError()
+                except ValueError:
+                    await interaction.response.send_message(
+                        f"❌ Invalid UUID format: {key[:8]}...",
+                        ephemeral=True
+                    )
+                    return
+
+            # Remove valid keys
+            removed = 0
+            for key in key_list:
+                for full_hash in list(guild_config.main_store):
+                    if key_security.verify_key(key, full_hash):
+                        await guild_config.remove_key(full_hash, guild_id)
+                        removed += 1
+                        break
+
+            await save_config()
+            await interaction.response.send_message(
+                f"✅ Removed {removed} keys!\n• Not found: {len(key_list)-removed}",
+                ephemeral=True
+            )
+                
+        except Exception as e:
+            logging.error(f"Key removal error: {str(e)}")
+            await interaction.response.send_message(
+                "❌ Failed to remove keys!",
+                ephemeral=True
+            )
+
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
