@@ -727,7 +727,7 @@ class RealmKeeper(commands.Cog):
             
             # Initialize worker pools
             logging.info("👷 Starting worker pools...")
-            self.worker_pool.start()
+            # self.worker_pool.start()
             
             # Sync commands
             await self.command_sync.sync_all()
