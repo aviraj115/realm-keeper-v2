@@ -338,9 +338,15 @@ bot = None
 # Update main function
 async def main():
     """Main entry point"""
+    global bot
+    
     try:
         # Initialize bot
         bot = RealmBot()
+        
+        # Start cleanup task
+        cleanup = KeyCleanup(bot)
+        await cleanup.start()
         
         # Start bot
         async with bot:
@@ -349,6 +355,11 @@ async def main():
     except Exception as e:
         logging.error(f"Startup error: {str(e)}")
         raise
+    finally:
+        if cleanup:
+            await cleanup.stop()
+        if bot:
+            await bot.close()
 
 # Configuration handling
 class GuildConfig:
@@ -783,27 +794,38 @@ async def load_config():
 
 async def create_dynamic_command(command_name: str, guild_id: int, client: discord.Client):
     """Create a dynamic claim command for a guild"""
-    guild = client.get_guild(guild_id)
-    if not guild:
-        return
-
-    # Remove existing command if it exists
     try:
-        existing = client.tree.get_command(command_name, guild=guild)
-        if existing:
-            client.tree.remove_command(command_name, guild=guild)
-    except:
-        pass
+        guild = client.get_guild(guild_id)
+        if not guild:
+            logging.error(f"Guild {guild_id} not found")
+            return False
 
-    @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
-    async def dynamic_claim(interaction: discord.Interaction):
-        """Dynamic claim command"""
-        if interaction.guild_id != guild_id:
-            return
-        await interaction.response.send_modal(ArcaneGatewayModal())
+        # Create the command
+        @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
+        @app_commands.guild_only()
+        async def dynamic_claim(interaction: discord.Interaction):
+            """Dynamic claim command"""
+            if interaction.guild_id != guild_id:
+                return
+            await interaction.response.send_modal(ArcaneGatewayModal())
 
-    client.tree.add_command(dynamic_claim, guild=guild)
-    await client.tree.sync(guild=guild)
+        # Remove existing command if it exists
+        try:
+            existing = client.tree.get_command(command_name, guild=guild)
+            if existing:
+                client.tree.remove_command(command_name, guild=guild)
+        except:
+            pass
+
+        # Add and sync command
+        client.tree.add_command(dynamic_claim, guild=guild)
+        await client.tree.sync(guild=guild)
+        logging.info(f"Created command /{command_name} in guild {guild_id}")
+        return True
+
+    except Exception as e:
+        logging.error(f"Failed to create command {command_name} in guild {guild_id}: {e}")
+        return False
 
 class CommandSync:
     def __init__(self, bot):
@@ -823,6 +845,21 @@ class RealmKeeper(commands.Cog):
         self.bot = bot
         self.worker_pool = AdaptiveWorkerPool(min_workers=4, max_workers=16)
         self.interaction_timeout = 15.0
+    
+    async def sync_commands_to_guild(self, guild_id: int) -> bool:
+        """Sync commands to a specific guild"""
+        try:
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                return False
+            
+            await self.bot.tree.sync(guild=guild)
+            logging.info(f"Synced commands to guild {guild_id}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Guild sync error: {str(e)}")
+            return False
     
     async def handle_interaction_timeout(self, interaction: discord.Interaction):
         """Handle interaction timeout gracefully"""
@@ -1063,39 +1100,83 @@ class RealmKeeper(commands.Cog):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    async def validate_role_permissions(self, interaction: discord.Interaction, role_id: int) -> tuple[bool, str]:
-        """Validate role and bot permissions"""
+    @app_commands.command(name="grimoire", description="📖 View available commands")
+    @app_commands.guild_only()
+    async def grimoire(self, interaction: discord.Interaction):
+        """View available commands"""
+        embed = discord.Embed(
+            title="📖 Realm Keeper Commands",
+            description="Here are the mystical commands at your disposal:",
+            color=discord.Color.blue()
+        )
+        
+        # Admin commands
+        admin_cmds = (
+            "`/setup` - Initial server setup\n"
+            "`/sync` - Sync commands to server\n"
+            "`/addkey` - Add a single key\n"
+            "`/addkeys` - Add multiple keys\n"
+            "`/removekey` - Remove a single key\n"
+            "`/removekeys` - Remove multiple keys\n"
+            "`/clearkeys` - Remove all keys\n"
+            "`/keys` - View key statistics\n"
+            "`/customize` - Customize success messages\n"
+            "`/cooldown` - Manage claim cooldowns"
+        )
+        embed.add_field(name="🛡️ Admin Commands", value=admin_cmds, inline=False)
+        
+        # User commands
+        guild_config = interaction.client.config.guilds.get(interaction.guild.id)
+        if guild_config:
+            user_cmds = f"`/{guild_config.command}` - Claim your role with a key"
+            embed.add_field(name="✨ User Commands", value=user_cmds, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="customize", description="✏️ Customize success messages")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def customize(self, interaction: discord.Interaction):
+        """Customize success messages"""
+        await interaction.response.send_modal(CustomizeModal())
+
+    @app_commands.command(name="cooldown", description="⏲️ Manage claim cooldowns")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def cooldown(self, interaction: discord.Interaction, minutes: int):
+        """Set claim cooldown duration"""
         try:
-            # Check if role exists
-            if not (role := interaction.guild.get_role(role_id)):
-                return False, "❌ Invalid role ID!"
+            if minutes < 0:
+                await interaction.response.send_message(
+                    "❌ Cooldown must be 0 or more minutes!",
+                    ephemeral=True
+                )
+                return
             
-            # Get bot member
-            bot_member = interaction.guild.get_member(self.bot.user.id)
-            if not bot_member:
-                return False, "❌ Bot member not found!"
+            guild_id = interaction.guild.id
+            if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
+                await interaction.response.send_message(
+                    "❌ Run /setup first!",
+                    ephemeral=True
+                )
+                return
             
-            # Check if bot can manage roles
-            if not bot_member.guild_permissions.manage_roles:
-                return False, "❌ Bot needs 'Manage Roles' permission!"
+            # Update cooldown
+            claim_cooldown.cooldown.per = minutes * 60
             
-            # Check if bot's highest role is above target role
-            if bot_member.top_role <= role:
-                return False, "❌ Bot's highest role must be above the target role!"
+            # Clear existing cooldowns
+            if guild_id in claim_cooldown._cooldowns:
+                claim_cooldown._cooldowns[guild_id].clear()
             
-            # Check if role is managed by integration
-            if role.managed:
-                return False, "❌ Cannot use integration-managed roles!"
-            
-            # Check if role is @everyone
-            if role.is_default():
-                return False, "❌ Cannot use @everyone role!"
-            
-            return True, role.mention
+            msg = "✅ Claim cooldown removed!" if minutes == 0 else f"✅ Claim cooldown set to {minutes} minutes!"
+            await interaction.response.send_message(msg, ephemeral=True)
             
         except Exception as e:
-            logging.error(f"Role validation error: {e}")
-            return False, "❌ Role validation failed!"
+            logging.error(f"Cooldown error: {e}")
+            await interaction.response.send_message(
+                "❌ Failed to update cooldown!",
+                ephemeral=True
+            )
 
 class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
     keys = discord.ui.TextInput(
@@ -1437,227 +1518,14 @@ class KeyLocks:
 key_locks = KeyLocks()
 
 class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            # Validate key format first
-            is_valid, error = await self.bot.key_validator.validate_key(
-                self.key.value.strip(),
-                interaction.guild_id
-            )
-            
-            if not is_valid:
-                await interaction.response.send_message(
-                    f"❌ {error}",
-                    ephemeral=True
-                )
-            return
-
-            # Continue with key verification...
-            
-            # Acquire lock for key verification
-            if not await key_locks.acquire(guild_id, key_value):
-                await progress_msg.edit(content="❌ System busy, please try again!")
-            return
-
-            try:
-                # Verify key
-                is_valid, updated_hash = await KeySecurity.verify_keys_batch(
-                    key_value, 
-                    possible_hashes,
-                    chunk_size=20
-                )
-                
-                if is_valid:
-                    # Update key storage under lock
-                    for full_hash in possible_hashes:
-                        if await KeySecurity.verify_key(key_value, full_hash)[0]:
-                            await guild_config.remove_key(full_hash, guild_id)
-                            if updated_hash:
-                                await guild_config.add_key(updated_hash, guild_id)
-                            break
-                    
-                    await save_config()
-                    
-                    # Grant role and send success message
-                    role = interaction.guild.get_role(guild_config.role_id)
-                    await interaction.user.add_roles(role)
-                    
-                    success_msg = random.choice(guild_config.success_msgs)
-                    await progress_msg.edit(content=success_msg.format(
-                        user=interaction.user.mention,
-                        role=role.mention
-                    ))
-                else:
-                    await progress_msg.edit(content="❌ Invalid key!")
-                    
-            finally:
-                # Always release lock
-                await key_locks.release(guild_id, key_value)
-                
-        except Exception as e:
-            logging.error(f"Claim error: {str(e)}")
-            await progress_msg.edit(content="❌ An error occurred!")
-
-class KeyValidator:
-    def __init__(self, bot):
-        self.bot = bot
-        self.worker_pool = ThreadPoolExecutor(max_workers=4)
-        self.validation_stats = defaultdict(lambda: {
-            'total': 0,
-            'valid': 0,
-            'invalid': 0,
-            'errors': 0
-        })
-    
-    async def validate_key(self, key: str, guild_id: int) -> tuple[bool, Optional[str]]:
-        """Validate key format and update stats"""
-        try:
-            self.validation_stats[guild_id]['total'] += 1
-            
-            # Basic format check
-            if not isinstance(key, str) or not key:
-                self.validation_stats[guild_id]['invalid'] += 1
-                return False, "Key must be a non-empty string"
-            
-            # Length check
-            if len(key) != 36:  # Standard UUID length
-                self.validation_stats[guild_id]['invalid'] += 1
-                return False, "Invalid key length"
-            
-            # Async UUID validation
-            try:
-                is_valid = await self.bot.loop.run_in_executor(
-                    self.worker_pool,
-                    self._validate_uuid,
-                    key
-                )
-                
-                if is_valid:
-                    self.validation_stats[guild_id]['valid'] += 1
-                    return True, None
-                else:
-                    self.validation_stats[guild_id]['invalid'] += 1
-                    return False, "Invalid key format"
-                    
-            except Exception as e:
-                self.validation_stats[guild_id]['errors'] += 1
-                logging.error(f"UUID validation error: {str(e)}")
-                return False, "Validation error"
-                
-        except Exception as e:
-            self.validation_stats[guild_id]['errors'] += 1
-            logging.error(f"Key validation error: {str(e)}")
-            return False, "Internal error"
-    
-    def _validate_uuid(self, key: str) -> bool:
-        """Synchronous UUID validation"""
-        try:
-            return str(uuid.UUID(key, version=4)) == key.lower()
-        except ValueError:
-            return False
-    
-    def get_stats(self, guild_id: int) -> dict:
-        """Get validation stats for a guild"""
-        return self.validation_stats[guild_id]
-
-@tasks.loop(minutes=5)
-async def save_stats_task():
-    """Save bot statistics periodically"""
-    try:
-        stats = {
-            'system': {
-                'memory': psutil.Process().memory_info().rss,
-                'cpu': psutil.cpu_percent(),
-                'uptime': time.time() - start_time
-            },
-            'discord': {
-                'latency': round(bot.latency * 1000, 2),
-                'guilds': len(bot.guilds),
-                'users': sum(g.member_count for g in bot.guilds)
-            },
-            'keys': {
-                'total': sum(len(cfg.main_store) for cfg in bot.config.guilds.values()),
-                'guilds': len(bot.config.guilds)
-            }
-        }
-        
-        async with aiofiles.open('stats.json', 'w') as f:
-            await f.write(json.dumps(stats, indent=4))
-            
-    except Exception as e:
-        logging.error(f"Stats save error: {str(e)}")
-
-@tasks.loop(minutes=15)
-async def memory_check():
-    """Monitor memory usage and cleanup if needed"""
-    try:
-        memory = psutil.Process().memory_info()
-        if memory.rss > 1024 * 1024 * 1024:  # 1GB
-            logging.warning("High memory usage, running garbage collection")
-            import gc
-            gc.collect()
-    except Exception as e:
-        logging.error(f"Memory check error: {str(e)}")
-
-@tasks.loop(minutes=5)
-async def monitor_workers():
-    """Monitor and adjust worker pools"""
-    try:
-        for guild_id, guild_config in config.items():
-            queue_size = worker_pool.pool._work_queue.qsize()
-            active_workers = len(worker_pool.pool._threads)
-            
-            if queue_size > 50:
-                worker_pool.scale_up()
-            elif queue_size < 10:
-                worker_pool.scale_down()
-                
-            logging.info(
-                f"Worker pool stats for {guild_id}:\n"
-                f"• Queue size: {queue_size}\n"
-                f"• Active workers: {active_workers}"
-            )
-    except Exception as e:
-        logging.error(f"Worker monitor error: {str(e)}")
-
-# Add before_loop for each task
-@cleanup_task.before_loop
-@save_stats_task.before_loop
-@memory_check.before_loop
-@monitor_workers.before_loop
-async def before_task():
-    """Wait for bot to be ready before starting tasks"""
-    await bot.wait_until_ready()
-
-# Start time for uptime tracking
-start_time = time.time()
-
-# Add near other modal classes
-class SetupModal(discord.ui.Modal, title="Realm Setup"):
     def __init__(self):
         super().__init__()
-        # Add TextInputs as items
         self.add_item(discord.ui.TextInput(
-            label="Role Name",
-            placeholder="Enter the exact role name",
-            min_length=1,
-            max_length=100,
-            required=True
-        ))
-        self.add_item(discord.ui.TextInput(
-            label="Command Name",
-            placeholder="Enter command name (e.g. claim, verify, redeem)",
-            default="claim",
-            min_length=1,
-            max_length=32,
-            required=True
-        ))
-        self.add_item(discord.ui.TextInput(
-            label="Initial Keys (optional, one per line)",
-            style=discord.TextStyle.paragraph,
+            label="Enter your key",
             placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
-            required=False,
-            max_length=2000
+            min_length=36,
+            max_length=36,
+            required=True
         ))
     
     async def on_submit(self, interaction: discord.Interaction):
@@ -1665,122 +1533,141 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             # Defer response to prevent timeout
             await interaction.response.defer(ephemeral=True)
             
-            # Get values from inputs
-            role_name = self.children[0].value
-            command_name = self.children[1].value.lower()
-            initial_keys = self.children[2].value.strip().split('\n') if self.children[2].value.strip() else []
-
-            # Check if command name is valid
-            if command_name in RESERVED_NAMES:
-                await interaction.followup.send(
-                    "❌ That command name is reserved! Please choose another.",
-                    ephemeral=True
-                )
-                return
-
-            # Find role by name
-            role = discord.utils.get(interaction.guild.roles, name=role_name)
-            if not role:
-                await interaction.followup.send(
-                    "❌ Role not found! Please enter the exact role name.",
-                    ephemeral=True
-                )
-                return
-
-            # Validate bot permissions
-            bot_member = interaction.guild.me
-            if not bot_member.guild_permissions.manage_roles:
-                await interaction.followup.send(
-                    "❌ Bot needs 'Manage Roles' permission!",
-                    ephemeral=True
-                )
-                return
-
-            # Check if bot can manage the role
-            if role >= bot_member.top_role:
-                await interaction.followup.send(
-                    "❌ Bot's highest role must be above the target role!",
-                    ephemeral=True
-                )
-                return
-
-            # Check if role is managed by integration
-            if role.managed:
-                await interaction.followup.send(
-                    "❌ Cannot use integration-managed roles!",
-                    ephemeral=True
-                )
-                return
-
-            # Check if role is @everyone
-            if role.is_default():
-                await interaction.followup.send(
-                    "❌ Cannot use @everyone role!",
-                    ephemeral=True
-                )
-                return
-
-            # Create config
+            # Get key and validate format
+            key_value = self.children[0].value.strip()
+            
+            # Get guild config
             guild_id = interaction.guild.id
-            interaction.client.config.guilds[guild_id] = GuildConfig(
-                role_id=role.id,
-                valid_keys=set(),  # Initialize with empty set
-                command=command_name
-            )
+            guild_config = interaction.client.config.guilds.get(guild_id)
+            if not guild_config:
+                await interaction.followup.send("❌ Server not setup! Use /setup first", ephemeral=True)
+                return
             
-            # Process initial keys if provided
-            valid_keys = []
-            if initial_keys:
-                for key in initial_keys:
-                    key = key.strip()
-                    if len(key) == 36:  # UUID length
-                        try:
-                            uuid_obj = uuid.UUID(key, version=4)
-                            if str(uuid_obj) == key.lower():
-                                valid_keys.append(key)
-                        except ValueError:
-                            continue
-
-            # Add valid keys if any
-            if valid_keys:
-                guild_config = interaction.client.config.guilds[guild_id]
-                for key in valid_keys:
-                    hashed = KeySecurity.hash_key(key)
-                    await guild_config.add_key(hashed, guild_id)
-                stats.log_keys_added(guild_id, len(valid_keys))
-                await audit.log_key_add(interaction, len(valid_keys))
+            # Validate UUID format
+            try:
+                uuid_obj = uuid.UUID(key_value, version=4)
+                if str(uuid_obj) != key_value.lower():
+                    raise ValueError()
+            except ValueError:
+                await interaction.followup.send("❌ Invalid key format!", ephemeral=True)
+                return
             
-            # Save and sync
-            await interaction.client.config.save()
-            await create_dynamic_command(command_name, guild_id, interaction.client)
+            # Check cooldown
+            if retry_after := claim_cooldown.get_retry_after(interaction):
+                minutes = int(retry_after / 60)
+                seconds = int(retry_after % 60)
+                await interaction.followup.send(
+                    f"⏳ Please wait {minutes}m {seconds}s before trying again!",
+                    ephemeral=True
+                )
+                return
             
-            # Build response message
-            response = [
-                "✅ Setup complete!",
-                f"• Role: {role.mention}",
-                f"• Command: /{command_name}"
-            ]
-            if valid_keys:
-                response.append(f"• Added {len(valid_keys)} keys")
-                if len(valid_keys) != len(initial_keys):
-                    response.append(f"• Skipped {len(initial_keys) - len(valid_keys)} invalid keys")
-            else:
-                response.append("• Add keys with /addkey or /addkeys")
+            # Verify key
+            for full_hash in guild_config.main_store:
+                is_valid, updated_hash = KeySecurity.verify_key(key_value, full_hash)
+                if is_valid:
+                    # Remove used key
+                    await guild_config.remove_key(full_hash, guild_id)
+                    
+                    # Grant role
+                    role = interaction.guild.get_role(guild_config.role_id)
+                    await interaction.user.add_roles(role)
+                    
+                    # Save changes
+                    await interaction.client.config.save()
+                    
+                    # Log success
+                    stats.log_claim(guild_id, True)
+                    await audit.log_claim(interaction, True)
+                    
+                    # Send success message
+                    success_msg = random.choice(guild_config.success_msgs)
+                    await interaction.followup.send(
+                        success_msg.format(
+                            user=interaction.user.mention,
+                            role=role.mention
+                        ),
+                        ephemeral=True
+                    )
+                    return
             
-            await interaction.followup.send(
-                "\n".join(response),
-                ephemeral=True
-            )
+            # Key not found
+            stats.log_claim(guild_id, False)
+            await audit.log_claim(interaction, False)
+            await interaction.followup.send("❌ Invalid key!", ephemeral=True)
             
         except Exception as e:
-            logging.error(f"Setup error: {e}")
+            logging.error(f"Claim error: {str(e)}")
             try:
-                await interaction.followup.send(
-                    "❌ Setup failed!",
-                    ephemeral=True
-                )
+                await interaction.followup.send("❌ An error occurred!", ephemeral=True)
             except:
                 pass
+
+class CustomizeModal(discord.ui.Modal, title="Customize Messages"):
+    messages = discord.ui.TextInput(
+        label="Success Messages (one per line)",
+        style=discord.TextStyle.long,
+        placeholder="✨ {user} has unlocked the {role} role!",
+        required=True,
+        max_length=2000
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Get guild config
+            guild_id = interaction.guild.id
+            guild_config = interaction.client.config.guilds.get(guild_id)
+            if not guild_config:
+                await interaction.response.send_message(
+                    "❌ Server not setup! Use /setup first",
+                    ephemeral=True
+                )
+                return
+            
+            # Parse messages
+            messages = [msg.strip() for msg in self.messages.value.split("\n") if msg.strip()]
+            if not messages:
+                await interaction.response.send_message(
+                    "❌ No valid messages found!",
+                    ephemeral=True
+                )
+                return
+            
+            # Validate message format
+            invalid = []
+            valid = []
+            for msg in messages:
+                try:
+                    # Test format with dummy values
+                    msg.format(user="@user", role="@role")
+                    valid.append(msg)
+                except (KeyError, ValueError):
+                    invalid.append(msg)
+            
+            if not valid:
+                await interaction.response.send_message(
+                    "❌ No valid messages found! Messages must contain {user} and {role} placeholders.",
+                    ephemeral=True
+                )
+                return
+            
+            # Update config
+            guild_config.success_msgs = valid
+            await interaction.client.config.save()
+            
+            # Build response
+            msg = [f"✅ Updated to {len(valid)} success messages!"]
+            if invalid:
+                msg.append(f"• Skipped {len(invalid)} invalid messages")
+            
+            await interaction.response.send_message("\n".join(msg), ephemeral=True)
+            
+        except Exception as e:
+            logging.error(f"Customize error: {str(e)}")
+            await interaction.response.send_message(
+                "❌ Failed to update messages!",
+                ephemeral=True
+            )
 
 class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
     keys = discord.ui.TextInput(
@@ -1875,6 +1762,159 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 "❌ Failed to add keys!", 
                 ephemeral=True
             )
+
+class SetupModal(discord.ui.Modal, title="Realm Setup"):
+    def __init__(self):
+        super().__init__()
+        self.add_item(discord.ui.TextInput(
+            label="Role Name",
+            placeholder="Enter the exact role name",
+            min_length=1,
+            max_length=100,
+            required=True
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Command Name",
+            placeholder="Enter command name (e.g. claim, verify, redeem)",
+            default="claim",
+            min_length=1,
+            max_length=32,
+            required=True
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Initial Keys (optional, one per line)",
+            style=discord.TextStyle.paragraph,
+            placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+            required=False,
+            max_length=2000
+        ))
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Defer response to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
+            # Get values from inputs
+            role_name = self.children[0].value
+            command_name = self.children[1].value.lower()
+            initial_keys = self.children[2].value.strip().split('\n') if self.children[2].value.strip() else []
+
+            # Check if command name is valid
+            if command_name in RESERVED_NAMES:
+                await interaction.followup.send(
+                    "❌ That command name is reserved! Please choose another.",
+                    ephemeral=True
+                )
+                return
+
+            # Find role by name
+            role = discord.utils.get(interaction.guild.roles, name=role_name)
+            if not role:
+                await interaction.followup.send(
+                    "❌ Role not found! Please enter the exact role name.",
+                    ephemeral=True
+                )
+                return
+
+            # Validate bot permissions
+            bot_member = interaction.guild.me
+            if not bot_member.guild_permissions.manage_roles:
+                await interaction.followup.send(
+                    "❌ Bot needs 'Manage Roles' permission!",
+                    ephemeral=True
+                )
+                return
+
+            # Check if bot can manage the role
+            if role >= bot_member.top_role:
+                await interaction.followup.send(
+                    "❌ Bot's highest role must be above the target role!",
+                    ephemeral=True
+                )
+                return
+
+            # Check if role is managed by integration
+            if role.managed:
+                await interaction.followup.send(
+                    "❌ Cannot use integration-managed roles!",
+                    ephemeral=True
+                )
+                return
+
+            # Check if role is @everyone
+            if role.is_default():
+                await interaction.followup.send(
+                    "❌ Cannot use @everyone role!",
+                    ephemeral=True
+                )
+                return
+
+            # Create config
+            guild_id = interaction.guild.id
+            interaction.client.config.guilds[guild_id] = GuildConfig(
+                role_id=role.id,
+                valid_keys=set(),  # Initialize with empty set
+                command=command_name
+            )
+            
+            # Process initial keys if provided
+            valid_keys = []
+            invalid_format = []
+            if initial_keys:
+                for key in initial_keys:
+                    key = key.strip()
+                    try:
+                        uuid_obj = uuid.UUID(key, version=4)
+                        if str(uuid_obj) == key.lower():
+                            valid_keys.append(key)
+                        else:
+                            invalid_format.append(key)
+                    except ValueError:
+                        invalid_format.append(key)
+
+            # Add valid keys if any
+            if valid_keys:
+                guild_config = interaction.client.config.guilds[guild_id]
+                for key in valid_keys:
+                    hashed = KeySecurity.hash_key(key)
+                    await guild_config.add_key(hashed, guild_id)
+                stats.log_keys_added(guild_id, len(valid_keys))
+                await audit.log_key_add(interaction, len(valid_keys))
+            
+            # Save and sync
+            await interaction.client.config.save()
+            success = await create_dynamic_command(command_name, guild_id, interaction.client)
+            
+            # Build response message
+            response = [
+                "✅ Setup complete!",
+                f"• Role: {role.mention}",
+                f"• Command: /{command_name}"
+            ]
+            if valid_keys:
+                response.append(f"• Added {len(valid_keys)} keys")
+                if invalid_format:
+                    response.append(f"• Skipped {len(invalid_format)} invalid keys")
+            else:
+                response.append("• Add keys with /addkey or /addkeys")
+            
+            if not success:
+                response.append("⚠️ Failed to create command, use /sync to retry")
+            
+            await interaction.followup.send(
+                "\n".join(response),
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logging.error(f"Setup error: {e}")
+            try:
+                await interaction.followup.send(
+                    "❌ Setup failed!",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
