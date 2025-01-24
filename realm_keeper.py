@@ -1190,46 +1190,87 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Defer response to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
             guild_id = interaction.guild.id
             if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
-                await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Run /setup first!", 
+                    ephemeral=True
+                )
                 return
 
             # Validate all keys first
             key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
+            if not key_list:
+                await interaction.followup.send(
+                    "❌ No keys provided!", 
+                    ephemeral=True
+                )
+                return
+
+            invalid_format = []
+            valid_keys = []
             for key in key_list:
                 try:
                     uuid_obj = uuid.UUID(key, version=4)
                     if str(uuid_obj) != key.lower():
-                        raise ValueError()
+                        invalid_format.append(key)
+                    else:
+                        valid_keys.append(key)
                 except ValueError:
-                    await interaction.response.send_message(
-                        f"❌ Invalid UUID format: {key[:8]}...",
-                        ephemeral=True
-                    )
-                    return
+                    invalid_format.append(key)
+
+            if not valid_keys:
+                msg = ["❌ No valid keys to remove!"]
+                if invalid_format:
+                    msg.append(f"• Invalid format: {len(invalid_format)}")
+                await interaction.followup.send(
+                    "\n".join(msg),
+                    ephemeral=True
+                )
+                return
 
             # Remove valid keys
             removed = 0
-            for key in key_list:
+            not_found = []
+            for key in valid_keys:
+                found = False
                 for full_hash in list(guild_config.main_store):
                     if KeySecurity.verify_key(key, full_hash)[0]:
                         await guild_config.remove_key(full_hash, guild_id)
                         removed += 1
+                        found = True
                         break
+                if not found:
+                    not_found.append(key)
 
             await interaction.client.config.save()
-            await interaction.response.send_message(
-                f"✅ Removed {removed} keys!\n• Not found: {len(key_list)-removed}",
+            stats.log_keys_removed(guild_id, removed)
+            await audit.log_key_remove(interaction, removed)
+            
+            # Build response message
+            msg = [f"✅ Removed {removed} keys!"]
+            if not_found:
+                msg.append(f"• Not found: {len(not_found)}")
+            if invalid_format:
+                msg.append(f"• Invalid format: {len(invalid_format)}")
+            
+            await interaction.followup.send(
+                "\n".join(msg),
                 ephemeral=True
             )
 
         except Exception as e:
             logging.error(f"Key removal error: {str(e)}")
-            await interaction.response.send_message(
-                "❌ Failed to remove keys!",
-                ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    "❌ Failed to remove keys!",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 @tasks.loop(hours=1)
 async def cleanup_task():
@@ -1615,60 +1656,70 @@ class CustomizeModal(discord.ui.Modal, title="Customize Messages"):
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Get guild config
+            # Defer response to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
             guild_id = interaction.guild.id
-            guild_config = interaction.client.config.guilds.get(guild_id)
-            if not guild_config:
-                await interaction.response.send_message(
-                    "❌ Server not setup! Use /setup first",
+            if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
+                await interaction.followup.send(
+                    "❌ Run /setup first!", 
                     ephemeral=True
                 )
                 return
-            
-            # Parse messages
-            messages = [msg.strip() for msg in self.messages.value.split("\n") if msg.strip()]
+
+            # Parse and validate messages
+            messages = [m.strip() for m in self.messages.value.split("\n") if m.strip()]
             if not messages:
-                await interaction.response.send_message(
-                    "❌ No valid messages found!",
+                await interaction.followup.send(
+                    "❌ No messages provided!", 
                     ephemeral=True
                 )
                 return
-            
+
             # Validate message format
-            invalid = []
-            valid = []
+            invalid_format = []
+            valid_messages = []
             for msg in messages:
                 try:
                     # Test format with dummy values
-                    msg.format(user="@user", role="@role")
-                    valid.append(msg)
+                    msg.format(user="test", role="test")
+                    valid_messages.append(msg)
                 except (KeyError, ValueError):
-                    invalid.append(msg)
-            
-            if not valid:
-                await interaction.response.send_message(
-                    "❌ No valid messages found! Messages must contain {user} and {role} placeholders.",
+                    invalid_format.append(msg)
+
+            if not valid_messages:
+                msg = ["❌ No valid messages found!"]
+                if invalid_format:
+                    msg.append(f"• Invalid format: {len(invalid_format)}")
+                await interaction.followup.send(
+                    "\n".join(msg),
                     ephemeral=True
                 )
                 return
-            
-            # Update config
-            guild_config.success_msgs = valid
+
+            # Update guild config
+            guild_config.success_msgs = valid_messages
             await interaction.client.config.save()
             
-            # Build response
-            msg = [f"✅ Updated to {len(valid)} success messages!"]
-            if invalid:
-                msg.append(f"• Skipped {len(invalid)} invalid messages")
+            # Build response message
+            msg = [f"✅ Updated success messages! ({len(valid_messages)} total)"]
+            if invalid_format:
+                msg.append(f"• Invalid format: {len(invalid_format)}")
             
-            await interaction.response.send_message("\n".join(msg), ephemeral=True)
-            
-        except Exception as e:
-            logging.error(f"Customize error: {str(e)}")
-            await interaction.response.send_message(
-                "❌ Failed to update messages!",
+            await interaction.followup.send(
+                "\n".join(msg),
                 ephemeral=True
             )
+
+        except Exception as e:
+            logging.error(f"Customize error: {str(e)}")
+            try:
+                await interaction.followup.send(
+                    "❌ Failed to update messages!",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
     keys = discord.ui.TextInput(
@@ -1681,11 +1732,14 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Defer response to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
             # Get guild config
             guild_id = interaction.guild.id
             guild_config = interaction.client.config.guilds.get(guild_id)
             if not guild_config:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Server not setup! Use /setup first", 
                     ephemeral=True
                 )
@@ -1694,7 +1748,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             # Parse and validate keys
             key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
             if not key_list:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ No valid keys found!", 
                     ephemeral=True
                 )
@@ -1728,7 +1782,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                     msg.append(f"• Invalid format: {len(invalid_format)}")
                 if duplicates:
                     msg.append(f"• Duplicates: {len(duplicates)}")
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "\n".join(msg),
                     ephemeral=True
                 )
@@ -1752,17 +1806,20 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             if duplicates:
                 msg.append(f"• Duplicates: {len(duplicates)}")
             
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "\n".join(msg),
                 ephemeral=True
             )
             
         except Exception as e:
             logging.error(f"Bulk key add error: {str(e)}")
-            await interaction.response.send_message(
-                "❌ Failed to add keys!", 
-                ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    "❌ Failed to add keys!", 
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class SetupModal(discord.ui.Modal, title="Realm Setup"):
     def __init__(self):
