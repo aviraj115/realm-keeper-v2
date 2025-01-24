@@ -1859,10 +1859,10 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                     return
 
             # Validate key format
-            key_value = self.key.value.strip()
+            key_value = self.key.value.strip().lower()
             try:
                 uuid_obj = uuid.UUID(key_value, version=4)
-                if str(uuid_obj) != key_value.lower():
+                if str(uuid_obj) != key_value:
                     raise ValueError()
             except ValueError:
                 await interaction.followup.send(
@@ -1871,49 +1871,73 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 )
                 return
 
-            # Check if key exists and is valid
+            # Quick check using Bloom filter
+            if key_value not in guild_config.bloom:
+                stats.log_claim(guild_id, False)
+                await audit.log_claim(interaction, False)
+                await interaction.followup.send(
+                    "🌑 This key holds no power in these lands...", 
+                    ephemeral=True
+                )
+                return
+
+            # Check cache for potential matches
+            matches = await key_cache.get_matches(guild_id, key_value)
+            if matches is None:
+                # Cache miss - check all keys
+                matches = guild_config.main_store
+
+            # Verify key in batches
             key_found = False
-            for full_hash in list(guild_config.main_store):
-                valid, _ = await KeySecurity.verify_key(key_value, full_hash)
-                if valid:
+            valid_hash = None
+            
+            # Create batches of hashes to verify
+            verifications = [(key_value, h) for h in matches]
+            results = await KeySecurity.verify_keys_batch(verifications)
+
+            # Process results
+            for i, is_valid in enumerate(results):
+                if is_valid:
                     key_found = True
-                    # Remove key and grant role
-                    await guild_config.remove_key(full_hash, guild_id)
-                    await interaction.client.config.save()
-                    
-                    # Add role
-                    try:
-                        await interaction.user.add_roles(role)
-                    except discord.Forbidden:
-                        await interaction.followup.send(
-                            "🔒 The mystical barriers prevent me from bestowing this power!", 
-                            ephemeral=True
-                        )
-                        return
-                    except Exception as e:
-                        logging.error(f"Role grant error: {str(e)}")
-                        await interaction.followup.send(
-                            "💔 The ritual of bestowal has failed!", 
-                            ephemeral=True
-                        )
-                        return
-                    
-                    # Log success
-                    stats.log_claim(guild_id, True)
-                    await audit.log_claim(interaction, True)
-                    
-                    # Send success message
-                    success_msg = random.choice(guild_config.success_msgs)
+                    valid_hash = verifications[i][1]
+                    break
+
+            if key_found and valid_hash:
+                # Remove key and grant role
+                await guild_config.remove_key(valid_hash, guild_id)
+                await interaction.client.config.save()
+                
+                # Add role
+                try:
+                    await interaction.user.add_roles(role)
+                except discord.Forbidden:
                     await interaction.followup.send(
-                        success_msg.format(
-                            user=interaction.user.mention,
-                            role=role.mention
-                        ),
+                        "🔒 The mystical barriers prevent me from bestowing this power!", 
                         ephemeral=True
                     )
                     return
-
-            if not key_found:
+                except Exception as e:
+                    logging.error(f"Role grant error: {str(e)}")
+                    await interaction.followup.send(
+                        "💔 The ritual of bestowal has failed!", 
+                        ephemeral=True
+                    )
+                    return
+                
+                # Log success
+                stats.log_claim(guild_id, True)
+                await audit.log_claim(interaction, True)
+                
+                # Send success message
+                success_msg = random.choice(guild_config.success_msgs)
+                await interaction.followup.send(
+                    success_msg.format(
+                        user=interaction.user.mention,
+                        role=role.mention
+                    ),
+                    ephemeral=True
+                )
+            else:
                 stats.log_claim(guild_id, False)
                 await audit.log_claim(interaction, False)
                 await interaction.followup.send(
