@@ -79,6 +79,100 @@ DEFAULT_SUCCESS_MESSAGES = [
     "🎯 Critical hit! {user} joins {role}!"
 ]
 
+# Stats tracking
+class Stats:
+    def __init__(self):
+        self.stats = defaultdict(lambda: {
+            'keys_added': 0,
+            'keys_removed': 0,
+            'total_claims': 0,
+            'successful_claims': 0,
+            'failed_claims': 0,
+            'timing': {
+                'average': 0,
+                'fastest': float('inf'),
+                'slowest': 0
+            }
+        })
+        self._lock = asyncio.Lock()
+    
+    def log_keys_added(self, guild_id: int, count: int):
+        """Log key additions"""
+        self.stats[guild_id]['keys_added'] += count
+    
+    def log_keys_removed(self, guild_id: int, count: int):
+        """Log key removals"""
+        self.stats[guild_id]['keys_removed'] += count
+    
+    def log_claim(self, guild_id: int, success: bool, duration: float = None):
+        """Log claim attempt"""
+        stats = self.stats[guild_id]
+        stats['total_claims'] += 1
+        if success:
+            stats['successful_claims'] += 1
+            if duration:
+                timing = stats['timing']
+                # Update timing stats
+                timing['fastest'] = min(timing['fastest'], duration)
+                timing['slowest'] = max(timing['slowest'], duration)
+                # Update running average
+                prev_avg = timing['average']
+                timing['average'] = prev_avg + (duration - prev_avg) / stats['successful_claims']
+        else:
+            stats['failed_claims'] += 1
+    
+    def reset_guild_stats(self, guild_id: int):
+        """Reset stats for a guild"""
+        if guild_id in self.stats:
+            del self.stats[guild_id]
+    
+    def get_stats(self, guild_id: int) -> dict:
+        """Get stats for a guild"""
+        return self.stats[guild_id]
+    
+    async def save_stats(self):
+        """Save stats to file"""
+        async with self._lock:
+            try:
+                async with aiofiles.open('stats.json', 'w') as f:
+                    await f.write(json.dumps(self.stats, indent=4))
+            except Exception as e:
+                logging.error(f"Failed to save stats: {str(e)}")
+
+# Audit logging
+class AuditLogger:
+    def __init__(self):
+        self.audit_file = 'audit.log'
+    
+    async def log_key_add(self, interaction: discord.Interaction, count: int):
+        """Log key addition"""
+        await self._log_event(interaction, f"Added {count} keys")
+    
+    async def log_key_remove(self, interaction: discord.Interaction, count: int):
+        """Log key removal"""
+        await self._log_event(interaction, f"Removed {count} keys")
+    
+    async def log_claim(self, interaction: discord.Interaction, success: bool):
+        """Log claim attempt"""
+        await self._log_event(interaction, f"Key claim {'succeeded' if success else 'failed'}")
+    
+    async def _log_event(self, interaction: discord.Interaction, event: str):
+        """Log an audit event"""
+        try:
+            timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+            user = f"{interaction.user} ({interaction.user.id})"
+            guild = f"{interaction.guild} ({interaction.guild.id})"
+            log_line = f"{timestamp} | {user} | {guild} | {event}\n"
+            
+            async with aiofiles.open(self.audit_file, 'a') as f:
+                await f.write(log_line)
+        except Exception as e:
+            logging.error(f"Audit logging failed: {str(e)}")
+
+# Initialize stats and audit
+stats = Stats()
+audit = AuditLogger()
+
 # Set event loop policy for Windows if needed
 if platform.system() == 'Windows':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -258,7 +352,7 @@ async def main():
 
 # Configuration handling
 class GuildConfig:
-    __slots__ = ('role_id', 'main_store', 'command', 'success_msgs')
+    __slots__ = ('role_id', 'main_store', 'command', 'success_msgs', 'bloom')
     
     def __init__(self, role_id: int, valid_keys: Set[str], command: str = "claim", 
                  success_msgs: list = None):
@@ -302,6 +396,9 @@ class GuildConfig:
             hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
             self.bloom.add(hash_part)
         await key_cache.invalidate(guild_id)
+    
+    # Alias for compatibility
+    add_keys = bulk_add_keys
 
 class Config:
     def __init__(self):
@@ -1694,7 +1791,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 )
                 return
 
-            guild_config.add_keys(valid_keys)
+            guild_config.bulk_add_keys(valid_keys, guild_id)
             await interaction.client.config.save()
             
             await interaction.response.send_message(
