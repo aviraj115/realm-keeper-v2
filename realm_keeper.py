@@ -1889,6 +1889,18 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 )
                 return
 
+            # Check cooldown only if not admin
+            if not interaction.user.guild_permissions.administrator:
+                retry_after = claim_cooldown.get_retry_after(interaction)
+                if retry_after:
+                    minutes = int(retry_after / 60)
+                    seconds = int(retry_after % 60)
+                    await interaction.followup.send(
+                        f"⌛ The arcane energies must replenish... Return in {minutes}m {seconds}s.",
+                        ephemeral=True
+                    )
+                    return
+
             # Validate and normalize key format
             key_value = self.children[0].value.strip().lower()
             try:
@@ -1901,18 +1913,6 @@ class ArcaneGatewayModal(discord.ui.Modal):
                     ephemeral=True
                 )
                 return
-
-            # Check cooldown
-            if not interaction.user.guild_permissions.administrator:
-                retry_after = claim_cooldown.get_retry_after(interaction)
-                if retry_after:
-                    minutes = int(retry_after / 60)
-                    seconds = int(retry_after % 60)
-                    await interaction.followup.send(
-                        f"⌛ The arcane energies must replenish... Return in {minutes}m {seconds}s.",
-                        ephemeral=True
-                    )
-                    return
 
             # Generate hash for the key
             key_hash = KeySecurity.hash_key(key_value)
