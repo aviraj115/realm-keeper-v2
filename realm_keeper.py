@@ -191,14 +191,15 @@ class Config:
         self.guilds = {}  # {guild_id: GuildConfig}
         self._lock = asyncio.Lock()
         self._backup_path = "config.backup.json"
-        
+        self._config_path = "config.json"
+    
     async def load(self):
         """Load configuration with error handling and backup"""
         try:
-            async with aiofiles.open('config.json', 'r') as f:
+            async with aiofiles.open(self._config_path, 'r') as f:
                 data = json.loads(await f.read())
                 
-            # Create backup before processing
+            # Create backup
             async with aiofiles.open(self._backup_path, 'w') as f:
                 await f.write(json.dumps(data))
                 
@@ -213,23 +214,9 @@ class Config:
                 for guild_id, cfg in data.items()
             }
             
-            # Warm caches with error handling
-            warm_tasks = []
-            for guild_id, guild_config in self.guilds.items():
-                task = asyncio.create_task(
-                    key_cache.warm_cache(guild_id, guild_config),
-                    name=f"warm-{guild_id}"
-                )
-                task.add_done_callback(
-                    lambda t: logging.error(f"Cache warm failed: {t.exception()}") 
-                    if t.exception() else None
-                )
-                warm_tasks.append(task)
-            
-            await asyncio.gather(*warm_tasks, return_exceptions=True)
-                
         except FileNotFoundError:
             logging.warning("Config file not found, starting fresh")
+            self.guilds = {}
             await self.save()  # Create initial config
             
         except json.JSONDecodeError as e:
@@ -260,8 +247,9 @@ class Config:
                 async with aiofiles.open(temp_path, 'w') as f:
                     await f.write(json.dumps(data, indent=4))
                 
-                # Atomic rename
-                await aiofiles.os.rename(temp_path, 'config.json')
+                # Atomic rename using os.replace
+                import os
+                os.replace(temp_path, self._config_path)
                 
             except Exception as e:
                 logging.error(f"Save error: {str(e)}")
