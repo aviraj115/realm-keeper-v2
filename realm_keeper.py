@@ -1559,6 +1559,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             guild_id = interaction.guild.id
             interaction.client.config.guilds[guild_id] = GuildConfig(
                 role_id=role.id,
+                valid_keys=set(),  # Initialize with empty set
                 command=command_name
             )
             
