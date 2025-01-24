@@ -1573,6 +1573,78 @@ class KeyValidator:
         """Get validation stats for a guild"""
         return self.validation_stats[guild_id]
 
+@tasks.loop(minutes=5)
+async def save_stats_task():
+    """Save performance statistics periodically"""
+    try:
+        stats = {
+            'system': {
+                'cpu': psutil.cpu_percent(),
+                'memory': psutil.Process().memory_info().rss / 1024 / 1024,
+                'uptime': time.time() - start_time
+            },
+            'discord': {
+                'latency': round(bot.latency * 1000, 2),
+                'guilds': len(bot.guilds),
+                'users': sum(g.member_count for g in bot.guilds)
+            },
+            'keys': {
+                'total': sum(len(cfg.main_store) for cfg in config.values()),
+                'guilds': len(config)
+            }
+        }
+        
+        async with aiofiles.open('stats.json', 'w') as f:
+            await f.write(json.dumps(stats, indent=4))
+            
+    except Exception as e:
+        logging.error(f"Stats save error: {str(e)}")
+
+@tasks.loop(minutes=15)
+async def memory_check():
+    """Monitor memory usage and cleanup if needed"""
+    try:
+        memory = psutil.Process().memory_info()
+        if memory.rss > 1024 * 1024 * 1024:  # 1GB
+            logging.warning("High memory usage, running garbage collection")
+            import gc
+            gc.collect()
+    except Exception as e:
+        logging.error(f"Memory check error: {str(e)}")
+
+@tasks.loop(minutes=5)
+async def monitor_workers():
+    """Monitor and adjust worker pools"""
+    try:
+        for guild_id, guild_config in config.items():
+            queue_size = worker_pool.pool._work_queue.qsize()
+            active_workers = len(worker_pool.pool._threads)
+            
+            if queue_size > 50:
+                worker_pool.scale_up()
+            elif queue_size < 10:
+                worker_pool.scale_down()
+                
+            logging.info(
+                f"Worker pool stats for {guild_id}:\n"
+                f"• Queue size: {queue_size}\n"
+                f"• Active workers: {active_workers}"
+            )
+    except Exception as e:
+        logging.error(f"Worker monitor error: {str(e)}")
+
+# Add before_loop for each task
+@cleanup_task.before_loop
+@save_stats_task.before_loop
+@memory_check.before_loop
+@monitor_workers.before_loop
+async def before_task():
+    """Wait for bot to be ready before starting tasks"""
+    await bot.wait_until_ready()
+
+# Start time for uptime tracking
+start_time = time.time()
+
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
