@@ -582,7 +582,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
             
             # Verify in parallel
             async with key_locks[guild_id][get_shard(user.id)]:
-                is_valid, matching_hash = await KeySecurity.verify_keys_parallel(
+                is_valid, updated_hash = await KeySecurity.verify_keys_parallel(
                     key_value, 
                     possible_hashes,
                     guild_config
@@ -594,8 +594,12 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                     await progress_msg.edit(content="❌ Invalid key or already claimed!")
                     return
 
-                # Remove the used key
-                await guild_config.remove_key(matching_hash, guild_id)
+                # Handle key updates/removal
+                matching_hash = next(h for h in possible_hashes if key_security.verify_key(key_value, h))
+                if updated_hash != matching_hash:  # Key was modified or used up
+                    await guild_config.remove_key(matching_hash, guild_id)
+                    if updated_hash:  # Key still has uses left
+                        await guild_config.add_key(updated_hash, guild_id)
                 await save_config()
 
             role = interaction.guild.get_role(guild_config.role_id)
@@ -668,23 +672,46 @@ class KeySecurity:
             return False
 
     @staticmethod
-    async def verify_key_async(key: str, full_hash: str, guild_config: GuildConfig = None) -> bool:
+    async def verify_key_async(key: str, full_hash: str, guild_config: GuildConfig = None) -> tuple[bool, Optional[str]]:
+        """Verify key and handle metadata, returning (is_valid, updated_hash)"""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            worker_pool.pool,
-            KeySecurity.verify_key,
-            key,
-            full_hash,
-            guild_config
-        )
+        try:
+            result = await loop.run_in_executor(
+                worker_pool.pool,
+                KeySecurity.verify_key,
+                key,
+                full_hash,
+                guild_config
+            )
+            
+            if not result:
+                return False, None
+                
+            # Handle metadata updates
+            if KeySecurity.DELIMITER in full_hash:
+                hash_part, meta_part = full_hash.split(KeySecurity.DELIMITER, 1)
+                metadata = json.loads(meta_part)
+                
+                if metadata.get('uses') is not None:
+                    metadata['uses'] -= 1
+                    if metadata['uses'] > 0:
+                        # Key still has uses left
+                        return True, f"{hash_part}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
+                    # Key used up
+                    return True, None
+                    
+            return True, full_hash
+            
+        except Exception:
+            return False, None
 
     @staticmethod
     async def verify_keys_parallel(key: str, hashes: Set[str], guild_config: GuildConfig = None) -> tuple[bool, Optional[str]]:
-        """Verify key against multiple hashes in parallel and return (is_valid, matching_hash)"""
+        """Verify key against multiple hashes in parallel"""
         if not hashes:
             return False, None
             
-        # Create verification tasks with hash mapping
+        # Create verification tasks
         tasks = {
             asyncio.create_task(KeySecurity.verify_key_async(key, full_hash, guild_config)): full_hash
             for full_hash in hashes
@@ -693,13 +720,15 @@ class KeySecurity:
         # Wait for first match or all failures
         for done_task in asyncio.as_completed(tasks.keys()):
             try:
-                if await done_task:
-                    matching_hash = tasks[done_task]
+                is_valid, updated_hash = await done_task
+                if is_valid:
                     # Cancel remaining tasks
                     for task in tasks:
                         if not task.done():
                             task.cancel()
-                    return True, matching_hash
+                            
+                    matching_hash = tasks[done_task]
+                    return True, updated_hash or matching_hash  # Use updated hash if available
             except asyncio.CancelledError:
                 pass
                 
