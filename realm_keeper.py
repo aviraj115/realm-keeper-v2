@@ -322,7 +322,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="🔮 the mystical portals"
+            name="⚡ for magical keys"
         )
     )
     
@@ -1107,7 +1107,7 @@ async def view_metrics(interaction: discord.Interaction):
         f"• CPU Usage: {cpu_percent}%\n"
         f"• Memory: {memory.rss / 1024 / 1024:.1f}MB\n"
         f"• Active workers: {len(worker_pool.pool._threads)}\n"
-        f"• Queue depth: {len(worker_pool.pool._work_queue.queue)}"
+        f"• Queue size: {worker_pool.pool._work_queue.qsize()}"
     )
     embed.add_field(name="🖥️ System", value=sys_stats, inline=False)
     
