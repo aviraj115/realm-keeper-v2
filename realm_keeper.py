@@ -318,11 +318,11 @@ async def on_ready():
     
     logging.info(f"Restored {restored} custom commands")
     
-    # Don't try to add command aliases - they should be registered when defining commands
+    # Update the presence message to be more magical
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="for /claim commands"
+            name="🔮 the mystical portals"
         )
     )
     
@@ -747,86 +747,56 @@ async def monitor_workers():
     except Exception as e:
         logging.error(f"Worker monitoring error: {str(e)}")
 
-class StatsTracker:
+class Stats:
     def __init__(self):
-        self.stats = defaultdict(lambda: {
+        self.guild_stats = defaultdict(lambda: {
             'total_claims': 0,
             'successful_claims': 0,
             'failed_claims': 0,
             'keys_added': 0,
-            'keys_removed': 0,
-            'last_claim': 0,
-            'last_key_add': 0,
-            'fastest_claim': float('inf'),
-            'slowest_claim': 0,
+            'claim_count': 0,
             'total_claim_time': 0,
-            'claim_count': 0
+            'fastest_claim': float('inf'),
+            'slowest_claim': 0
         })
-        self.load_stats()
     
-    async def save_stats(self):
-        async with aiofiles.open('stats.json', 'w') as f:
-            await f.write(json.dumps({
-                str(guild_id): data 
-                for guild_id, data in self.stats.items()
-            }, indent=4))
-    
-    def load_stats(self):
-        try:
-            with open('stats.json', 'r') as f:
-                data = json.loads(f.read())
-                self.stats.update({
-                    int(guild_id): stats_data
-                    for guild_id, stats_data in data.items()
-                })
-        except FileNotFoundError:
-            pass
-    
-    def log_claim(self, guild_id: int, success: bool, claim_time: float = None):
-        now = time.time()
-        guild_stats = self.stats[guild_id]
-        guild_stats['total_claims'] += 1
-        guild_stats['last_claim'] = now
-        
+    def log_claim(self, guild_id: int, success: bool, time_taken: float = None):
+        stats = self.guild_stats[guild_id]
+        stats['total_claims'] += 1
         if success:
-            guild_stats['successful_claims'] += 1
-            if claim_time:
-                guild_stats['claim_count'] += 1
-                guild_stats['total_claim_time'] += claim_time
-                guild_stats['fastest_claim'] = min(guild_stats['fastest_claim'], claim_time)
-                guild_stats['slowest_claim'] = max(guild_stats['slowest_claim'], claim_time)
+            stats['successful_claims'] += 1
         else:
-            guild_stats['failed_claims'] += 1
+            stats['failed_claims'] += 1
+        if time_taken is not None:
+            stats['claim_count'] += 1
+            stats['total_claim_time'] += time_taken
+            stats['fastest_claim'] = min(stats['fastest_claim'], time_taken)
+            stats['slowest_claim'] = max(stats['slowest_claim'], time_taken)
     
     def log_keys_added(self, guild_id: int, count: int):
-        guild_stats = self.stats[guild_id]
-        guild_stats['keys_added'] += count
-        guild_stats['last_key_add'] = time.time()
+        self.guild_stats[guild_id]['keys_added'] += count
+    
+    def get_stats(self, guild_id: int) -> dict:
+        return self.guild_stats[guild_id].copy()
 
-stats = StatsTracker()
+# Initialize stats
+stats = Stats()
 
 class AuditLogger:
-    def __init__(self):
-        self.logger = logging.getLogger('audit')
-        self.logger.setLevel(logging.INFO)
-        handler = logging.FileHandler('audit.log')
-        handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s'))
-        self.logger.addHandler(handler)
-    
-    async def log_claim(self, interaction: discord.Interaction, key: str, success: bool):
-        self.logger.info(
-            f"CLAIM | User: {interaction.user} ({interaction.user.id}) | "
-            f"Guild: {interaction.guild.name} ({interaction.guild.id}) | "
-            f"Key: {key[:3]}... | Success: {success}"
+    async def log_claim(self, interaction: discord.Interaction, key_prefix: str, success: bool):
+        logging.info(
+            f"Claim attempt by {interaction.user} ({interaction.user.id}) "
+            f"in {interaction.guild.name} ({interaction.guild.id}) "
+            f"with key {key_prefix}... - {'✅' if success else '❌'}"
         )
     
     async def log_key_add(self, interaction: discord.Interaction, count: int):
-        self.logger.info(
-            f"ADD_KEYS | Admin: {interaction.user} ({interaction.user.id}) | "
-            f"Guild: {interaction.guild.name} ({interaction.guild.id}) | "
-            f"Count: {count}"
+        logging.info(
+            f"Added {count} keys in {interaction.guild.name} ({interaction.guild.id}) "
+            f"by {interaction.user} ({interaction.user.id})"
         )
 
+# Initialize audit logger
 audit = AuditLogger()
 
 def admin_cooldown():
@@ -908,7 +878,7 @@ async def keys(interaction: discord.Interaction):
                  if KeySecurity.DELIMITER in h and 
                  json.loads(h.split(KeySecurity.DELIMITER)[1]).get('exp', 0) < time.time())
     
-    guild_stats = stats.stats[guild_id]
+    guild_stats = stats.get_stats(guild_id)
     embed = discord.Embed(
         title="🔑 Key Statistics",
         color=discord.Color.blue()
@@ -1235,6 +1205,49 @@ class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
         except Exception as e:
             logging.error(f"Bulk key add error: {str(e)}")
             await progress_msg.edit(content="❌ Failed to add keys!")
+
+class QueueMetrics:
+    def __init__(self):
+        self.metrics = defaultdict(lambda: {
+            'processed': 0,
+            'errors': 0,
+            'avg_wait_time': 0.0,
+            'total_wait_time': 0.0,
+            'requests_waiting': 0,
+            'peak_queue_size': 0,
+            'last_processed': 0
+        })
+        self._lock = asyncio.Lock()
+    
+    async def update(self, guild_id: int, wait_time: float = None, error: bool = False):
+        """Update metrics for a guild"""
+        async with self._lock:
+            m = self.metrics[guild_id]
+            m['processed'] += 1
+            m['errors'] += int(error)
+            m['last_processed'] = time.time()
+            
+            if wait_time is not None:
+                total = m['avg_wait_time'] * (m['processed'] - 1)
+                m['total_wait_time'] += wait_time
+                m['avg_wait_time'] = (total + wait_time) / m['processed']
+    
+    async def update_queue_size(self, guild_id: int, size: int):
+        """Update queue size metrics"""
+        async with self._lock:
+            m = self.metrics[guild_id]
+            m['requests_waiting'] = size
+            m['peak_queue_size'] = max(m['peak_queue_size'], size)
+    
+    def get_metrics(self, guild_id: int) -> dict:
+        """Get current metrics for a guild"""
+        return self.metrics[guild_id].copy()
+
+# Initialize queue metrics
+queue_metrics = QueueMetrics()
+
+# Add after KeySecurity class definition
+key_security = KeySecurity()
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
