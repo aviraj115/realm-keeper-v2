@@ -739,8 +739,8 @@ class RealmKeeper(commands.Cog):
             fake_key = str(uuid.uuid4())
             for _ in range(4):
                 await asyncio.get_event_loop().run_in_executor(
-                    self.key_security.worker_pool,
-                    KeySecurity.hash_key,
+                    self.worker_pool,
+                    self.key_security.hash_key,  # Use instance method
                     fake_key
                 )
             
@@ -1146,20 +1146,14 @@ async def before_cleanup():
 class KeySecurity:
     DELIMITER = "||"
     HASH_PREFIX_LENGTH = 7
-    HASH_ROUNDS = 10  # Reduced bcrypt rounds for better performance
+    HASH_ROUNDS = 10
     
     def __init__(self):
-        """Initialize security with environment configuration"""
-        # Load salt from environment or generate
         self.salt = self._load_or_generate_salt()
-        
-        # Configure worker pool
         self.worker_pool = ThreadPoolExecutor(
             max_workers=max(8, os.cpu_count() * 2),
             thread_name_prefix="key-verify"
         )
-        
-        # Track security metrics
         self.metrics = defaultdict(lambda: {
             'hashes': 0,
             'verifications': 0,
@@ -1190,26 +1184,17 @@ class KeySecurity:
             # Use fallback salt in emergency
             return secrets.token_bytes(16)
     
-    async def hash_key(self, key: str, expiry_seconds: Optional[int] = None, 
-                      max_uses: Optional[int] = None, guild_id: int = 0) -> str:
-        """Hash a key with metadata and salt"""
+    def hash_key(self, key: str, expiry_seconds: Optional[int] = None) -> str:
+        """Hash a key with metadata"""
         try:
             # Prepare metadata
             meta = {}
             if expiry_seconds:
                 meta['exp'] = time.time() + expiry_seconds
-            if max_uses:
-                meta['uses'] = max_uses
             
             # Add salt and hash
             salted_key = f"{key}{self.salt.hex()}"
-            hash_str = await self.bot.loop.run_in_executor(
-                self.worker_pool,
-                lambda: bcrypt_sha256.using(rounds=self.HASH_ROUNDS).hash(salted_key)
-            )
-            
-            # Update metrics
-            self.metrics[guild_id]['hashes'] += 1
+            hash_str = bcrypt_sha256.using(rounds=self.HASH_ROUNDS).hash(salted_key)
             
             # Add metadata if needed
             if meta:
@@ -1219,71 +1204,6 @@ class KeySecurity:
         except Exception as e:
             logging.error(f"Hash error: {str(e)}")
             raise
-    
-    async def verify_key(self, key: str, full_hash: str, guild_id: int = 0) -> tuple[bool, Optional[str]]:
-        """Verify a key with metrics"""
-        start_time = time.time()
-        try:
-            # Split hash and metadata
-            if self.DELIMITER in full_hash:
-                hash_part, meta_part = full_hash.split(self.DELIMITER, 1)
-                try:
-                    metadata = json.loads(meta_part)
-                except json.JSONDecodeError:
-                    self.metrics[guild_id]['failures'] += 1
-                    return False, None
-                
-                # Check expiry first
-                if metadata.get('exp', float('inf')) < time.time():
-                    self.metrics[guild_id]['failures'] += 1
-                    return False, None
-                
-                # Check uses
-                uses = metadata.get('uses', 1)
-                if uses <= 0:
-                    self.metrics[guild_id]['failures'] += 1
-                    return False, None
-                
-                # Update uses if valid
-                if uses > 0:
-                    metadata['uses'] = uses - 1
-            else:
-                hash_part = full_hash
-                metadata = {}
-            
-            # Add salt and verify
-            salted_key = f"{key}{self.salt.hex()}"
-            is_valid = await self.bot.loop.run_in_executor(
-                self.worker_pool,
-                lambda: bcrypt_sha256.verify(salted_key, hash_part)
-            )
-            
-            # Update metrics
-            verify_time = time.time() - start_time
-            self.metrics[guild_id]['verifications'] += 1
-            if not is_valid:
-                self.metrics[guild_id]['failures'] += 1
-            
-            # Update average verification time
-            m = self.metrics[guild_id]
-            m['avg_verify_time'] = (
-                (m['avg_verify_time'] * (m['verifications'] - 1) + verify_time) / 
-                m['verifications']
-            )
-            
-            # Return result with updated metadata if needed
-            if is_valid and metadata.get('uses', 1) > 0:
-                return True, f"{hash_part}{self.DELIMITER}{json.dumps(metadata)}"
-            return is_valid, None
-            
-        except Exception as e:
-            logging.error(f"Verification error: {str(e)}")
-            self.metrics[guild_id]['failures'] += 1
-            return False, None
-    
-    def get_metrics(self, guild_id: int) -> dict:
-        """Get security metrics for a guild"""
-        return self.metrics[guild_id]
 
 class KeyCleanup:
     def __init__(self, bot):
