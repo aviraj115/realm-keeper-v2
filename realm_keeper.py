@@ -862,7 +862,10 @@ async def create_dynamic_command(command_name: str, guild_id: int, client: disco
             """Dynamic claim command"""
             if interaction.guild_id != guild_id:
                 return
-            await interaction.response.send_modal(ArcaneGatewayModal())
+                
+            # Create and send modal
+            modal = ArcaneGatewayModal()
+            await interaction.response.send_modal(modal)
 
         # Remove existing command if it exists
         try:
@@ -1844,13 +1847,15 @@ class KeyLocks:
 key_locks = KeyLocks()
 
 class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
-    key = discord.ui.TextInput(
-        label="✨ Present Your Arcane Key",
-        placeholder="Inscribe your mystical key (format: xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx)",
-        min_length=36,
-        max_length=36,
-        required=True
-    )
+    def __init__(self):
+        super().__init__(title="🔮 Mystical Gateway", timeout=None)
+        self.add_item(discord.ui.TextInput(
+            label="✨ Present Your Arcane Key",
+            placeholder="Inscribe your mystical key (format: xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx)",
+            min_length=36,
+            max_length=36,
+            required=True
+        ))
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -1895,7 +1900,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                     return
 
             # Validate and normalize key format
-            key_value = self.key.value.strip().lower()
+            key_value = self.children[0].value.strip().lower()
             try:
                 uuid_obj = uuid.UUID(key_value, version=4)
                 if str(uuid_obj) != key_value:
