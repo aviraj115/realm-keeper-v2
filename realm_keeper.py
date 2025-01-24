@@ -152,21 +152,7 @@ class RealmBot(commands.AutoShardedBot):
         self.connector = None
         self.realm_keeper = None
         self.config = Config()
-        self.key_cleanup = KeyCleanup(self)
-        self.command_sync = CommandSync(self)
-        self.key_validator = KeyValidator(self)
-        
-        # Add cog on init
-        self.initial_setup = asyncio.create_task(self._setup_cogs())
-    
-    async def _setup_cogs(self):
-        """Setup cogs and sync commands"""
-        self.realm_keeper = RealmKeeper(self)
-        await self.add_cog(self.realm_keeper)
-        
-        # Sync commands globally
-        await self.tree.sync()
-        logging.info("✅ Commands synced globally")
+        self.ready = asyncio.Event()
     
     async def setup_hook(self):
         """Initialize bot systems"""
@@ -180,14 +166,32 @@ class RealmBot(commands.AutoShardedBot):
             )
             self.session = aiohttp.ClientSession(connector=self.connector)
             
-            # Wait for cogs to be setup
-            await self.initial_setup
+            # Add cog
+            self.realm_keeper = RealmKeeper(self)
+            await self.add_cog(self.realm_keeper)
             
             # Initialize systems
             await self.config.load()
             
         except Exception as e:
-            logging.error(f"Setup error: {str(e)}")
+            logging.error(f"Setup error: {e}")
+            raise
+    
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Called when bot is ready"""
+        try:
+            # Sync commands after bot is ready
+            await self.tree.sync()
+            logging.info("✅ Commands synced globally")
+            
+            # Set ready event
+            self.ready.set()
+            
+            logging.info(f"✅ Bot ready as {self.user}")
+            
+        except Exception as e:
+            logging.error(f"Ready event error: {e}")
             raise
     
     async def close(self):
