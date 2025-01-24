@@ -2288,7 +2288,7 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 )
                 return
 
-            # Create config
+            # Create config with empty key set first
             guild_id = interaction.guild.id
             interaction.client.config.guilds[guild_id] = GuildConfig(
                 role_id=role.id,
@@ -2298,7 +2298,6 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             
             # Process initial keys if provided
             added = 0
-            duplicates = 0
             invalid = 0
             
             if initial_keys:
@@ -2307,56 +2306,29 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                     ephemeral=True
                 )
                 
-                # Process in chunks
-                CHUNK_SIZE = 100
-                total_chunks = (len(initial_keys) + CHUNK_SIZE - 1) // CHUNK_SIZE
-                
-                for chunk_idx in range(total_chunks):
-                    start_idx = chunk_idx * CHUNK_SIZE
-                    end_idx = min(start_idx + CHUNK_SIZE, len(initial_keys))
-                    chunk = initial_keys[start_idx:end_idx]
-                    
-                    # Process chunk
-                    chunk_valid = []
-                    chunk_hashes = {}
-                    
-                    # Validate format
-                    for key in chunk:
-                        try:
-                            uuid_obj = uuid.UUID(key, version=4)
-                            if str(uuid_obj) == key.lower():
-                                chunk_valid.append(key)
-                                chunk_hashes[key] = KeySecurity.hash_key(key)
-                            else:
-                                invalid += 1
-                        except ValueError:
+                # Pre-validate all keys first
+                valid_keys = {}
+                for key in initial_keys:
+                    try:
+                        uuid_obj = uuid.UUID(key, version=4)
+                        if str(uuid_obj) == key.lower():
+                            # Pre-compute hash
+                            valid_keys[key] = KeySecurity.hash_key(key)
+                        else:
                             invalid += 1
-                    
-                    # Add valid keys
+                    except ValueError:
+                        invalid += 1
+
+                # Bulk add all valid keys at once
+                if valid_keys:
                     guild_config = interaction.client.config.guilds[guild_id]
-                    for key in chunk_valid:
-                        await guild_config.add_key(chunk_hashes[key], guild_id)
-                        added += 1
+                    await guild_config.bulk_add_keys(set(valid_keys.values()), guild_id)
+                    added = len(valid_keys)
                     
-                    # Save periodically
-                    if chunk_idx % 5 == 0:
-                        await interaction.client.config.save()
-                        
-                    # Update progress for large batches
-                    if len(initial_keys) > 1000 and chunk_idx % 10 == 0:
-                        progress = (chunk_idx + 1) * 100 / total_chunks
-                        await interaction.followup.send(
-                            f"⏳ Setup progress: {progress:.1f}%\n"
-                            f"• Keys added: {added}\n"
-                            f"• Invalid format: {invalid}",
-                            ephemeral=True
-                        )
-            
-            # Save final state
-            await interaction.client.config.save()
-            if added > 0:
-                stats.log_keys_added(guild_id, added)
-                await audit.log_key_add(interaction, added)
+                    # Save after bulk add
+                    await interaction.client.config.save()
+                    stats.log_keys_added(guild_id, added)
+                    await audit.log_key_add(interaction, added)
             
             # Create command
             success = await create_dynamic_command(command_name, guild_id, interaction.client)
