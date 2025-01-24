@@ -90,6 +90,7 @@ worker_pool = AdaptiveWorkerPool()
 # Initialize bot with optimized connection handling
 class RealmBot(commands.AutoShardedBot):
     def __init__(self):
+        # Initialize bot with settings
         super().__init__(
             command_prefix="!",
             intents=intents,
@@ -98,21 +99,21 @@ class RealmBot(commands.AutoShardedBot):
             timeout=HTTP_TIMEOUT,
             http_retry_count=MAX_RETRIES
         )
+        
+        # Initialize components
         self.connector = None
         self.realm_keeper = None
         self.config = Config()
         self.key_cleanup = KeyCleanup(self)
         self.command_sync = CommandSync(self)
         self.key_validator = KeyValidator(self)
-        
-        # Set up command tree
-        self.tree = app_commands.CommandTree(self)
     
     async def setup_hook(self):
         """Initialize bot systems"""
         await self.config.load()
         await self.key_cleanup.start()
         await self.command_sync.sync_all()
+        
         # Create connector in async context
         self.connector = TCPConnector(
             limit=MAX_CONNECTIONS,
@@ -125,9 +126,6 @@ class RealmBot(commands.AutoShardedBot):
         # Add realm keeper cog
         self.realm_keeper = RealmKeeper(self)
         await self.add_cog(self.realm_keeper)
-        
-        # Sync commands
-        await self.tree.sync()
     
     async def close(self):
         """Cleanup on shutdown"""
