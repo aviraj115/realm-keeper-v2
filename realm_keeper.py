@@ -1091,48 +1091,56 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
             ephemeral=True
         )
 
-@tasks.loop(seconds=30)
-async def monitor_performance():
-    """Monitor bot performance metrics"""
+@tasks.loop(hours=1)
+async def cleanup_task():
+    """Cleanup expired keys periodically"""
     try:
-        # System metrics
-        cpu_percent = psutil.cpu_percent()
-        memory = psutil.Process().memory_info()
-        
-        # Discord metrics
-        latency = round(bot.latency * 1000, 2)
-        event_loop = asyncio.get_event_loop()
-        pending_tasks = len([t for t in asyncio.all_tasks(event_loop) if not t.done()])
-        
-        # Worker metrics
-        queue_size = worker_pool.pool._work_queue.qsize()
-        active_workers = len(worker_pool.pool._threads)
-        
-        logging.info(
-            f"Performance Metrics:\n"
-            f"• System:\n"
-            f"  - CPU: {cpu_percent}%\n"
-            f"  - Memory: {memory.rss / 1024 / 1024:.1f}MB\n"
-            f"• Discord:\n"
-            f"  - Latency: {latency}ms\n"
-            f"  - Pending Tasks: {pending_tasks}\n"
-            f"• Workers:\n"
-            f"  - Queue Size: {queue_size}\n"
-            f"  - Active Workers: {active_workers}"
-        )
-        
-        # Scale workers if needed
-        if queue_size > 50 and cpu_percent < 90:
-            worker_pool.scale_up()
-        elif queue_size < 10:
-            worker_pool.scale_down()
+        logging.info("Starting scheduled key cleanup")
+        for guild_id, guild_config in config.items():
+            expired = set()
+            invalid = set()
             
+            # Check each key
+            for full_hash in guild_config.main_store:
+                if KeySecurity.DELIMITER in full_hash:
+                    try:
+                        _, meta = full_hash.split(KeySecurity.DELIMITER, 1)
+                        meta_data = json.loads(meta)
+                        
+                        # Check expiration
+                        if meta_data.get('exp', float('inf')) < time.time():
+                            expired.add(full_hash)
+                            continue
+                            
+                        # Check uses
+                        if meta_data.get('uses', 1) <= 0:
+                            expired.add(full_hash)
+                            continue
+                            
+                    except json.JSONDecodeError:
+                        invalid.add(full_hash)
+            
+            # Remove expired and invalid keys
+            if expired or invalid:
+                guild_config.main_store -= (expired | invalid)
+                await key_cache.invalidate(guild_id)
+                
+                logging.info(
+                    f"Guild {guild_id} cleanup:\n"
+                    f"• Expired: {len(expired)}\n"
+                    f"• Invalid: {len(invalid)}\n"
+                    f"• Remaining: {len(guild_config.main_store)}"
+                )
+        
+        # Save changes
+        await save_config()
+        
     except Exception as e:
-        logging.error(f"Monitoring error: {str(e)}")
+        logging.error(f"Cleanup error: {str(e)}")
 
-# Start monitoring when bot is ready
-@monitor_performance.before_loop
-async def before_monitor():
+@cleanup_task.before_loop
+async def before_cleanup():
+    """Wait for bot to be ready before starting cleanup"""
     await bot.wait_until_ready()
 
 class KeySecurity:
