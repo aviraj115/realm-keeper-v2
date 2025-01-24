@@ -707,6 +707,24 @@ class CommandSync:
         """Get sync stats for a guild"""
         return self.sync_stats[guild_id]
 
+def admin_cooldown():
+    """Custom cooldown for admin commands"""
+    async def predicate(interaction: discord.Interaction):
+        if interaction.user.guild_permissions.administrator:
+            return True
+        if not hasattr(interaction.command, '_buckets'):
+            interaction.command._buckets = commands.CooldownMapping.from_cooldown(
+                1, 300, commands.BucketType.user
+            )
+        bucket = interaction.command._buckets.get_bucket(interaction)
+        retry_after = bucket.update_rate_limit()
+        if retry_after:
+            raise commands.CommandOnCooldown(
+                bucket, retry_after, commands.BucketType.user
+            )
+        return True
+    return app_commands.check(predicate)
+
 class RealmKeeper(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -858,12 +876,14 @@ class RealmKeeper(commands.Cog):
 
     @app_commands.command(name="setup", description="⚙️ Initial setup")
     @app_commands.default_permissions(administrator=True)
+    @admin_cooldown()
     async def setup(self, interaction: discord.Interaction):
         """Initial server setup"""
         await interaction.response.send_modal(SetupModal())
 
     @app_commands.command(name="keys", description="📊 View key statistics")
     @app_commands.default_permissions(administrator=True)
+    @admin_cooldown()
     async def keys(self, interaction: discord.Interaction):
         """View key statistics for the server"""
         guild_id = interaction.guild.id
@@ -915,6 +935,7 @@ class RealmKeeper(commands.Cog):
 
     @app_commands.command(name="clearkeys", description="🗑️ Remove all keys")
     @app_commands.default_permissions(administrator=True)
+    @admin_cooldown()
     async def clearkeys(self, interaction: discord.Interaction):
         """Remove all keys from the server"""
         guild_id = interaction.guild.id
@@ -978,6 +999,7 @@ class RealmKeeper(commands.Cog):
 
     @app_commands.command(name="sync", description="🔄 Force sync commands")
     @app_commands.default_permissions(administrator=True)
+    @admin_cooldown()
     async def sync_guild_commands(self, interaction: discord.Interaction):
         """Force sync commands with this guild"""
         try:
@@ -990,6 +1012,7 @@ class RealmKeeper(commands.Cog):
             await interaction.followup.send("❌ Sync failed!", ephemeral=True)
 
     @app_commands.command(name="grimoire", description="📚 View command documentation")
+    @admin_cooldown()
     async def grimoire(self, interaction: discord.Interaction):
         """View detailed command documentation"""
         embed = discord.Embed(
