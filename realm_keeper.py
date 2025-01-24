@@ -242,7 +242,10 @@ async def load_config():
             for guild_id, guild_config in config.items():
                 await key_cache.warm_cache(guild_id, guild_config)
                 
-except FileNotFoundError:
+    except FileNotFoundError:
+        config = {}
+    except Exception as e:
+        logging.error(f"Failed to load config: {str(e)}")
         config = {}
 
 async def create_dynamic_command(command_name: str, guild_id: int):
