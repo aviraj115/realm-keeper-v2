@@ -610,49 +610,7 @@ class KeySecurity:
         self.worker_pool = ThreadPoolExecutor(max_workers=4)
     
     @staticmethod
-    def hash_key(key: str, expiry_seconds: Optional[int] = None, max_uses: Optional[int] = None) -> str:
-        """Hash a key with optional metadata"""
-        hash_str = bcrypt_sha256.hash(key)
-        if expiry_seconds or max_uses:
-            metadata = {}
-            if expiry_seconds:
-                metadata['exp'] = time.time() + expiry_seconds
-            if max_uses:
-                metadata['uses'] = max_uses
-            return f"{hash_str}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
-        return hash_str
-
-    async def verify_keys_batch(self, key: str, hashes: Set[str], chunk_size: int = 10) -> tuple[bool, Optional[str]]:
-        """Verify key against multiple hashes in parallel batches"""
-        if not hashes:
-            return False, None
-            
-        # Split hashes into chunks for batch processing
-        hash_chunks = [list(hashes)[i:i + chunk_size] for i in range(0, len(hashes), chunk_size)]
-        
-        for chunk in hash_chunks:
-            # Process chunk in parallel
-            tasks = [
-                asyncio.get_event_loop().run_in_executor(
-                    self.worker_pool,
-                    self.verify_key,
-                    key,
-                    full_hash
-                )
-                for full_hash in chunk
-            ]
-            
-            # Wait for all verifications in chunk
-            results = await asyncio.gather(*tasks)
-            
-            # Check results
-            for i, (is_valid, updated_hash) in enumerate(results):
-                if is_valid:
-                    return True, updated_hash or chunk[i]
-                    
-        return False, None
-
-    def verify_key(self, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
+    def verify_key(key: str, full_hash: str) -> tuple[bool, Optional[str]]:
         """Verify key and handle metadata"""
         try:
             if KeySecurity.DELIMITER in full_hash:
@@ -682,6 +640,49 @@ class KeySecurity:
                 
         except Exception:
             return False, None
+
+    async def verify_keys_batch(self, key: str, hashes: Set[str], chunk_size: int = 10) -> tuple[bool, Optional[str]]:
+        """Verify key against multiple hashes in parallel batches"""
+        if not hashes:
+            return False, None
+            
+        # Split hashes into chunks for batch processing
+        hash_chunks = [list(hashes)[i:i + chunk_size] for i in range(0, len(hashes), chunk_size)]
+        
+        for chunk in hash_chunks:
+            # Process chunk in parallel
+            tasks = [
+                asyncio.get_event_loop().run_in_executor(
+                    self.worker_pool,
+                    KeySecurity.verify_key,  # Now using the static method
+                    key,
+                    full_hash
+                )
+                for full_hash in chunk
+            ]
+            
+            # Wait for all verifications in chunk
+            results = await asyncio.gather(*tasks)
+            
+            # Check results
+            for i, (is_valid, updated_hash) in enumerate(results):
+                if is_valid:
+                    return True, updated_hash or chunk[i]
+                    
+        return False, None
+
+    @staticmethod
+    def hash_key(key: str, expiry_seconds: Optional[int] = None, max_uses: Optional[int] = None) -> str:
+        """Hash a key with optional metadata"""
+        hash_str = bcrypt_sha256.hash(key)
+        if expiry_seconds or max_uses:
+            metadata = {}
+            if expiry_seconds:
+                metadata['exp'] = time.time() + expiry_seconds
+            if max_uses:
+                metadata['uses'] = max_uses
+            return f"{hash_str}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
+        return hash_str
 
 class AdaptiveWorkerPool:
     def __init__(self, min_workers: int = 4, max_workers: int = 32):
