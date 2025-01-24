@@ -578,7 +578,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 return
 
             # Add queue size tracking
-            queue_size = len(worker_pool.pool._work_queue._queue)
+            queue_size = worker_pool.pool._work_queue.qsize()
             await queue_metrics.update_queue_size(guild_id, queue_size)
             
             async with key_locks[guild_id][get_shard(user.id)]:
@@ -599,6 +599,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                         
                         # Grant role and send success message
                         role = interaction.guild.get_role(guild_config.role_id)
+                        await user.add_roles(role)
                         success_msg = random.choice(guild_config.success_msgs)
                         await progress_msg.edit(
                             content=success_msg.format(
