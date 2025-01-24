@@ -1926,8 +1926,9 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 key_found = True
                 valid_hash = key_hash
             else:
-                # Try each stored hash
-                for stored_hash in guild_config.main_store:
+                # Try each stored hash - use a copy of the set to avoid modification during iteration
+                stored_hashes = list(guild_config.main_store)
+                for stored_hash in stored_hashes:
                     try:
                         if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
                             key_found = True
