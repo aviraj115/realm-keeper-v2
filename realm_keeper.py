@@ -190,11 +190,20 @@ class RealmBot(commands.AutoShardedBot):
             await self.connector.close()
         await super().close()
 
+# Add near the top with other globals
+bot = None
+
+# Update main function
 async def main():
     """Main entry point"""
     try:
-        async with RealmBot() as bot:
+        # Initialize bot
+        bot = RealmBot()
+        
+        # Start bot
+        async with bot:
             await bot.start(TOKEN)
+            
     except Exception as e:
         logging.error(f"Startup error: {str(e)}")
         raise
@@ -1505,6 +1514,70 @@ async def before_task():
 
 # Start time for uptime tracking
 start_time = time.time()
+
+# Add near other modal classes
+class SetupModal(discord.ui.Modal, title="Realm Setup"):
+    role = discord.ui.TextInput(
+        label="Role ID to grant (right-click role -> Copy ID)",
+        placeholder="Enter role ID...",
+        min_length=17,
+        max_length=20
+    )
+    
+    command = discord.ui.TextInput(
+        label="Command name (without /)",
+        placeholder="claim",
+        default="claim",
+        min_length=1,
+        max_length=32
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Validate role ID
+            try:
+                role_id = int(self.role.value)
+                if not (role := interaction.guild.get_role(role_id)):
+                    await interaction.response.send_message(
+                        "❌ Invalid role ID!", 
+                        ephemeral=True
+                    )
+                    return
+            except ValueError:
+                await interaction.response.send_message(
+                    "❌ Role ID must be a number!", 
+                    ephemeral=True
+                )
+                return
+            
+            # Create guild config
+            guild_id = interaction.guild.id
+            bot.config.guilds[guild_id] = GuildConfig(
+                role_id=role_id,
+                valid_keys=set(),
+                command=self.command.value.lower()
+            )
+            
+            # Save config
+            await bot.config.save()
+            
+            # Create dynamic command
+            await create_dynamic_command(self.command.value.lower(), guild_id)
+            
+            await interaction.response.send_message(
+                f"✅ Setup complete!\n"
+                f"• Role: {role.mention}\n"
+                f"• Command: /{self.command.value}\n"
+                f"• Add keys with /addkey or /addkeys",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logging.error(f"Setup error: {str(e)}")
+            await interaction.response.send_message(
+                "❌ An error occurred during setup!",
+                ephemeral=True
+            )
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
