@@ -23,6 +23,15 @@ from aiohttp import TCPConnector, ClientTimeout
 from discord import HTTPException, GatewayNotFound
 import backoff
 import sys
+import platform
+
+# Set event loop policy for Windows if needed
+if platform.system() == 'Windows':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# Create event loop
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 # Configuration and logging setup
 load_dotenv()
@@ -57,7 +66,8 @@ bot = commands.AutoShardedBot(
         enable_cleanup_closed=True
     ),
     timeout=HTTP_TIMEOUT,
-    http_retry_count=MAX_RETRIES
+    http_retry_count=MAX_RETRIES,
+    loop=loop  # Pass the event loop
 )
 
 # Configuration handling
@@ -1569,4 +1579,10 @@ if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
         raise ValueError("Missing DISCORD_TOKEN in environment")
-    bot.run(TOKEN)
+        
+    try:
+        loop.run_until_complete(bot.start(TOKEN))
+    except KeyboardInterrupt:
+        loop.run_until_complete(bot.close())
+    finally:
+        loop.close()
