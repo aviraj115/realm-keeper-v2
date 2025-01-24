@@ -18,6 +18,11 @@ import uuid
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import psutil
+import mmh3
+from aiohttp import TCPConnector, ClientTimeout
+from discord import HTTPException, GatewayNotFound
+import backoff
+import sys
 
 # Configuration and logging setup
 load_dotenv()
@@ -34,11 +39,25 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
+# Configure connection settings
+HTTP_TIMEOUT = ClientTimeout(total=30, connect=10)
+MAX_RETRIES = 3
+MAX_CONNECTIONS = 100
+
+# Initialize bot with optimized connection handling
 bot = commands.AutoShardedBot(
     command_prefix="!",
     intents=intents,
     case_insensitive=True,
-    max_messages=10000
+    max_messages=10000,
+    connector=TCPConnector(
+        limit=MAX_CONNECTIONS,
+        ttl_dns_cache=300,
+        force_close=False,
+        enable_cleanup_closed=True
+    ),
+    timeout=HTTP_TIMEOUT,
+    http_retry_count=MAX_RETRIES
 )
 
 # Configuration handling
@@ -196,28 +215,87 @@ class KeyCache:
     def __init__(self):
         self.quick_lookup = defaultdict(dict)  # {guild_id: {quick_hash: set(full_hashes)}}
         self.last_update = defaultdict(float)
-        self._lock = asyncio.Lock()
+        self.cache_hits = defaultdict(int)
+        self.cache_misses = defaultdict(int)
+        self.cache_size = 1000  # Max keys per guild to cache
     
     async def warm_cache(self, guild_id: int, guild_config: GuildConfig):
-        """Pre-compute quick hashes for a guild"""
-        quick_lookup = defaultdict(set)
-        for full_hash in guild_config.main_store:
-            # Handle metadata in hash
-            if KeySecurity.DELIMITER in full_hash:
-                hash_part = full_hash.split(KeySecurity.DELIMITER)[0]
-            else:
-                hash_part = full_hash
-            quick_hash = hashlib.sha256(hash_part.encode()).hexdigest()[:8]
-            quick_lookup[quick_hash].add(full_hash)
+        """Pre-compute quick hashes for a guild with optimized storage"""
+        try:
+            quick_lookup = defaultdict(set)
             
-        async with self._lock:
-            self.quick_lookup[guild_id] = quick_lookup
-            self.last_update[guild_id] = time.time()
+            # Process in chunks to avoid memory spikes
+            chunk_size = 100
+            hashes = list(guild_config.main_store)
+            
+            for i in range(0, len(hashes), chunk_size):
+                chunk = hashes[i:i + chunk_size]
+                for full_hash in chunk:
+                    # Handle metadata in hash
+                    if KeySecurity.DELIMITER in full_hash:
+                        hash_part = full_hash.split(KeySecurity.DELIMITER)[0]
+                    else:
+                        hash_part = full_hash
+                        
+                    # Use faster hash function for lookup
+                    quick_hash = mmh3.hash(hash_part.encode(), signed=False) & 0xFFFFFFFF
+                    quick_lookup[quick_hash].add(full_hash)
+                    
+                # Allow other tasks to run
+                await asyncio.sleep(0)
+            
+            async with self._lock:
+                # Limit cache size
+                if len(quick_lookup) > self.cache_size:
+                    # Keep most recently added keys
+                    keys_to_keep = list(quick_lookup.keys())[-self.cache_size:]
+                    quick_lookup = {k: quick_lookup[k] for k in keys_to_keep}
+                
+                self.quick_lookup[guild_id] = quick_lookup
+                self.last_update[guild_id] = time.time()
+                
+        except Exception as e:
+            logging.error(f"Cache warmup failed: {str(e)}")
+            # Invalidate cache on error
+            await self.invalidate(guild_id)
+    
+    async def get_possible_hashes(self, guild_id: int, key: str) -> Optional[Set[str]]:
+        """Get possible hash matches with metrics"""
+        try:
+            quick_hash = mmh3.hash(key.encode(), signed=False) & 0xFFFFFFFF
+            matches = self.quick_lookup[guild_id].get(quick_hash)
+            
+            if matches:
+                self.cache_hits[guild_id] += 1
+                return matches
+            
+            self.cache_misses[guild_id] += 1
+            return None
+            
+        except Exception:
+            return None
     
     async def invalidate(self, guild_id: int):
         """Force cache invalidation for a guild"""
         async with self._lock:
             self.quick_lookup.pop(guild_id, None)
+            self.last_update.pop(guild_id, None)
+            self.cache_hits.pop(guild_id, None)
+            self.cache_misses.pop(guild_id, None)
+    
+    def get_metrics(self, guild_id: int) -> dict:
+        """Get cache performance metrics"""
+        hits = self.cache_hits[guild_id]
+        misses = self.cache_misses[guild_id]
+        total = hits + misses
+        
+        return {
+            'hits': hits,
+            'misses': misses,
+            'hit_rate': hits / total if total > 0 else 0,
+            'size': len(self.quick_lookup.get(guild_id, {})),
+            'last_update': self.last_update.get(guild_id, 0)
+        }
 
 # Initialize cache
 key_cache = KeyCache()
@@ -292,35 +370,83 @@ async def sync_commands():
 
 @bot.event
 async def on_ready():
-    await load_config()
-    cleanup_task.start()
-    save_stats_task.start()
-    memory_check.start()
-    monitor_workers.start()
-    
-    logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    
-    # Restore dynamic commands first
-    restored = 0
-    for guild_id, guild_config in config.items():
-        try:
-            await create_dynamic_command(guild_config.command, guild_id)
-            restored += 1
-        except Exception as e:
-            logging.error(f"Failed to restore command for guild {guild_id}: {e}")
-    
-    logging.info(f"Restored {restored} custom commands")
-    
-    # Update the presence message to be more magical
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name="⚡ for magical keys"
+    """Initialize bot systems with monitoring"""
+    try:
+        logging.info("🔄 Starting bot systems...")
+        
+        # Load config first
+        await load_config()
+        
+        # Start background tasks
+        cleanup_task.start()
+        save_stats_task.start()
+        memory_check.start()
+        monitor_workers.start()
+        
+        # Pre-warm systems
+        logging.info("⚡ Pre-warming crypto...")
+        fake_key = str(uuid.uuid4())
+        for _ in range(4):
+            await asyncio.get_event_loop().run_in_executor(
+                key_security.worker_pool,
+                KeySecurity.hash_key,
+                fake_key
+            )
+        
+        # Pre-warm connection pool
+        logging.info("🌐 Pre-warming connections...")
+        async with bot.session.get(
+            "https://discord.com/api/v9/gateway",
+            timeout=HTTP_TIMEOUT
+        ) as resp:
+            await resp.read()
+            
+        # Pre-warm caches
+        logging.info("💾 Pre-warming caches...")
+        for guild_id, guild_config in config.items():
+            await key_cache.warm_cache(guild_id, guild_config)
+            
+        # Restore dynamic commands
+        restored = 0
+        for guild_id, guild_config in config.items():
+            try:
+                await create_dynamic_command(guild_config.command, guild_id)
+                restored += 1
+            except Exception as e:
+                logging.error(f"Failed to restore command for guild {guild_id}: {e}")
+        
+        logging.info(f"Restored {restored} custom commands")
+        
+        # Initialize worker pools
+        logging.info("👷 Starting worker pools...")
+        worker_pool.start()
+        
+        # Sync commands
+        await sync_commands()
+        
+        # Update presence
+        await bot.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name="⚡ for magical keys"
+            )
         )
-    )
-    
-    await sync_commands()
-    logging.info(f"Connected to {len(bot.guilds)} servers")
+        
+        # Log ready state
+        guild_count = len(bot.guilds)
+        key_count = sum(len(cfg.main_store) for cfg in config.values())
+        logging.info(
+            f"✅ Bot ready!\n"
+            f"• Guilds: {guild_count}\n"
+            f"• Total keys: {key_count}\n"
+            f"• Workers: {len(key_security.worker_pool._threads)}\n"
+            f"• Connections: {len(bot.http._HTTPClient__session.connector._conns)}\n"
+            f"• Commands restored: {restored}"
+        )
+        
+    except Exception as e:
+        logging.error(f"Startup error: {str(e)}")
+        # Continue with basic functionality
 
 @bot.event
 async def on_guild_join(guild):
@@ -530,7 +656,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
         min_length=36,
         max_length=36
     )
-
+    
     async def on_submit(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -541,17 +667,11 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
             )
             
             start_time = time.time()
-            
             guild_id = interaction.guild.id
             user = interaction.user
             key_value = self.key.value.strip()
             
-            guild_config = config.get(guild_id)
-            if not guild_config:
-                await progress_msg.edit(content="❌ Server not configured!")
-                return
-
-            # Validate UUID format
+            # Basic validation
             try:
                 uuid_obj = uuid.UUID(key_value, version=4)
                 if str(uuid_obj) != key_value.lower():
@@ -560,44 +680,70 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 await progress_msg.edit(content="❌ Invalid key format!")
                 return
 
-            # Add queue size tracking
-            queue_size = worker_pool.pool._work_queue.qsize()
-            await queue_metrics.update_queue_size(guild_id, queue_size)
-            
-            async with key_locks[guild_id][get_shard(user.id)]:
-                # Try direct verification first
-                for full_hash in guild_config.main_store:
-                    is_valid, updated_hash = KeySecurity.verify_key(key_value, full_hash)
-                    if is_valid:
-                        # Remove old hash
-                        await guild_config.remove_key(full_hash, guild_id)
-                        # Add updated hash if key still has uses
-                        if updated_hash:
-                            await guild_config.add_key(updated_hash, guild_id)
-                        await save_config()
-                        
-                        # Track successful processing
-                        process_time = time.time() - start_time
-                        await queue_metrics.update(guild_id, process_time)
-                        
-                        # Grant role and send success message
-                        role = interaction.guild.get_role(guild_config.role_id)
-                        await user.add_roles(role)
-                        success_msg = random.choice(guild_config.success_msgs)
-                        await progress_msg.edit(
-                            content=success_msg.format(
-                                user=user.mention,
-                                role=f"<@&{role.id}>"
-                            )
-                        )
-                        claim_time = time.time() - start_time
-                        stats.log_claim(guild_id, True, claim_time)
-                        await audit.log_claim(interaction, key_value[:8], True)
-            return
+            # Get guild config
+            if (guild_config := config.get(guild_id)) is None:
+                await progress_msg.edit(content="❌ Server not configured!")
+                return
 
-                # No valid matches found
-            await progress_msg.edit(content="❌ Invalid key or already claimed!")
-                
+            # Check cooldown
+            if retry_after := claim_cooldown.get_retry_after(interaction):
+                await progress_msg.edit(
+                    content=f"⏳ Please wait {int(retry_after)} seconds before trying again!"
+                )
+                return
+
+            # Get possible matches using quick lookup
+            quick_hash = mmh3.hash(key_value.encode(), signed=False) & 0xFFFFFFFF
+            possible_hashes = guild_config.quick_lookup.get(quick_hash, set())
+            
+            if not possible_hashes:
+                stats.log_claim(guild_id, False)
+                await audit.log_claim(interaction, key_value[:8], False)
+                await progress_msg.edit(content="❌ Invalid key or already claimed!")
+                return
+
+            # Verify in parallel batches
+            async with key_locks[guild_id][get_shard(user.id)]:
+                is_valid, updated_hash = await key_security.verify_keys_batch(
+                    key_value, 
+                    possible_hashes,
+                    chunk_size=20  # Larger chunks for better throughput
+                )
+
+                if not is_valid:
+                    stats.log_claim(guild_id, False)
+                    await audit.log_claim(interaction, key_value[:8], False)
+                    await progress_msg.edit(content="❌ Invalid key or already claimed!")
+                    return
+
+                # Update key storage
+                for full_hash in possible_hashes:
+                    if await key_security.verify_key(key_value, full_hash)[0]:
+                        await guild_config.remove_key(full_hash, guild_id)
+                        if updated_hash:  # Key still has uses
+                            await guild_config.add_key(updated_hash, guild_id)
+                        break
+
+                await save_config()
+
+            # Grant role
+            role = interaction.guild.get_role(guild_config.role_id)
+            await user.add_roles(role)
+            
+            # Log success
+            claim_time = time.time() - start_time
+            stats.log_claim(guild_id, True, claim_time)
+            await audit.log_claim(interaction, key_value[:8], True)
+            
+            # Send success message
+            success_msg = random.choice(guild_config.success_msgs)
+            await progress_msg.edit(
+                content=success_msg.format(
+                    user=user.mention,
+                    role=f"<@&{role.id}>"
+                )
+            )
+
         except Exception as e:
             logging.error(f"Claim error: {str(e)}")
             await progress_msg.edit(content="❌ An error occurred!")
@@ -605,14 +751,19 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
 class KeySecurity:
     DELIMITER = "||"
     HASH_PREFIX_LENGTH = 7
+    HASH_ROUNDS = 10  # Reduced bcrypt rounds for better performance
     
     def __init__(self):
-        self.worker_pool = ThreadPoolExecutor(max_workers=4)
+        self.worker_pool = ThreadPoolExecutor(
+            max_workers=max(8, os.cpu_count() * 2),  # More workers for parallel processing
+            thread_name_prefix="key-verify"
+        )
     
     @staticmethod
     def hash_key(key: str, expiry_seconds: Optional[int] = None, max_uses: Optional[int] = None) -> str:
         """Hash a key with optional metadata"""
-        hash_str = bcrypt_sha256.hash(key)
+        # Use optimized bcrypt settings
+        hash_str = bcrypt_sha256.using(rounds=KeySecurity.HASH_ROUNDS).hash(key)
         if expiry_seconds or max_uses:
             metadata = {}
             if expiry_seconds:
@@ -628,13 +779,17 @@ class KeySecurity:
         try:
             if KeySecurity.DELIMITER in full_hash:
                 hash_part, meta_part = full_hash.split(KeySecurity.DELIMITER, 1)
-                metadata = json.loads(meta_part)
+                # Fast-fail if metadata is invalid
+                try:
+                    metadata = json.loads(meta_part)
+                except:
+                    return False, None
                 
-                # Check expiry
+                # Check expiry first (fastest check)
                 if metadata.get('exp') and metadata['exp'] < time.time():
                     return False, None
                 
-                # Verify hash
+                # Only verify hash if metadata checks pass
                 if not bcrypt_sha256.verify(key, hash_part):
                     return False, None
                 
@@ -649,17 +804,18 @@ class KeySecurity:
                     
                 return True, full_hash
             else:
+                # Simple hash verification
                 return bcrypt_sha256.verify(key, full_hash), full_hash
                 
         except Exception:
             return False, None
 
-    async def verify_keys_batch(self, key: str, hashes: Set[str], chunk_size: int = 10) -> tuple[bool, Optional[str]]:
+    async def verify_keys_batch(self, key: str, hashes: Set[str], chunk_size: int = 20) -> tuple[bool, Optional[str]]:
         """Verify key against multiple hashes in parallel batches"""
         if not hashes:
             return False, None
             
-        # Split hashes into chunks for batch processing
+        # Larger chunks for better throughput
         hash_chunks = [list(hashes)[i:i + chunk_size] for i in range(0, len(hashes), chunk_size)]
         
         for chunk in hash_chunks:
@@ -667,20 +823,25 @@ class KeySecurity:
             tasks = [
                 asyncio.get_event_loop().run_in_executor(
                     self.worker_pool,
-                    KeySecurity.verify_key,  # Use static method
+                    KeySecurity.verify_key,
                     key,
                     full_hash
                 )
                 for full_hash in chunk
             ]
             
-            # Wait for all verifications in chunk
-            results = await asyncio.gather(*tasks)
-            
-            # Check results
-            for i, (is_valid, updated_hash) in enumerate(results):
-                if is_valid:
-                    return True, updated_hash or chunk[i]
+            # Wait for all verifications in chunk with timeout
+            try:
+                results = await asyncio.gather(*tasks, timeout=5.0)
+                
+                # Check results
+                for i, (is_valid, updated_hash) in enumerate(results):
+                    if is_valid:
+                        return True, updated_hash or chunk[i]
+            except asyncio.TimeoutError:
+                # Cancel remaining tasks on timeout
+                for task in tasks:
+                    task.cancel()
                     
         return False, None
 
@@ -688,30 +849,22 @@ class AdaptiveWorkerPool:
     def __init__(self, min_workers: int = 4, max_workers: int = 32):
         self.min_workers = min_workers
         self.max_workers = max_workers
-        self.current_workers = min_workers
         self.pool = ThreadPoolExecutor(
             max_workers=min_workers,
-            thread_name_prefix="bcrypt_worker"
+            thread_name_prefix="worker"
         )
-        self.queue_high = 50
-        self.queue_low = 10
-        self._lock = asyncio.Lock()
+        self._monitor_task = None
     
-    async def adjust_workers(self, queue_size: int, cpu_percent: float):
-        async with self._lock:
-            if queue_size > self.queue_high and cpu_percent < 90:
-                if self.current_workers < self.max_workers:
-                    self.current_workers = min(self.max_workers, self.current_workers + 2)
-                    self.pool._max_workers = self.current_workers
-                    logging.info(f"Scaled up workers to {self.current_workers}")
-                    
-            elif queue_size < self.queue_low and self.current_workers > self.min_workers:
-                self.current_workers = max(self.min_workers, self.current_workers - 1)
-                self.pool._max_workers = self.current_workers
-                logging.info(f"Scaled down workers to {self.current_workers}")
-    
-    def submit(self, fn, *args):
-        return self.pool.submit(fn, *args)
+    def start(self):
+        """Start the worker pool with pre-warming"""
+        # Pre-warm threads
+        futures = []
+        for _ in range(self.min_workers):
+            futures.append(self.pool.submit(lambda: None))
+        
+        # Wait for threads to start
+        for future in futures:
+            future.result()
 
 worker_pool = AdaptiveWorkerPool()
 
@@ -1345,6 +1498,72 @@ queue_metrics = QueueMetrics()
 
 # Initialize key security (near the top with other initializations)
 key_security = KeySecurity()
+
+# Add connection error handling
+@bot.event
+async def on_error(event, *args, **kwargs):
+    """Handle connection errors gracefully"""
+    error = sys.exc_info()[1]
+    if isinstance(error, (HTTPException, GatewayNotFound)):
+        logging.error(f"Discord API error in {event}: {str(error)}")
+        # Implement exponential backoff for retries
+        await backoff.expo(
+            bot.connect,
+            max_tries=MAX_RETRIES,
+            max_time=60
+        )
+    else:
+        logging.error(f"Error in {event}: {str(error)}")
+
+@bot.event
+async def on_connect():
+    """Log successful connections"""
+    logging.info(f"Connected to Discord API with {bot.shard_count} shards")
+    logging.info(f"Active connections: {len(bot.http._HTTPClient__session.connector._conns)}")
+
+@tasks.loop(seconds=30)
+async def monitor_performance():
+    """Monitor bot performance metrics"""
+    try:
+        # System metrics
+        cpu_percent = psutil.cpu_percent()
+        memory = psutil.Process().memory_info()
+        
+        # Discord metrics
+        latency = round(bot.latency * 1000, 2)
+        event_loop = asyncio.get_event_loop()
+        pending_tasks = len([t for t in asyncio.all_tasks(event_loop) if not t.done()])
+        
+        # Worker metrics
+        queue_size = worker_pool.pool._work_queue.qsize()
+        active_workers = len(worker_pool.pool._threads)
+        
+        logging.info(
+            f"Performance Metrics:\n"
+            f"• System:\n"
+            f"  - CPU: {cpu_percent}%\n"
+            f"  - Memory: {memory.rss / 1024 / 1024:.1f}MB\n"
+            f"• Discord:\n"
+            f"  - Latency: {latency}ms\n"
+            f"  - Pending Tasks: {pending_tasks}\n"
+            f"• Workers:\n"
+            f"  - Queue Size: {queue_size}\n"
+            f"  - Active Workers: {active_workers}"
+        )
+        
+        # Scale workers if needed
+        if queue_size > 50 and cpu_percent < 90:
+            worker_pool.scale_up()
+        elif queue_size < 10:
+            worker_pool.scale_down()
+            
+    except Exception as e:
+        logging.error(f"Monitoring error: {str(e)}")
+
+# Start monitoring when bot is ready
+@monitor_performance.before_loop
+async def before_monitor():
+    await bot.wait_until_ready()
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
