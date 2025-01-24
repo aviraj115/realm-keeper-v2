@@ -190,7 +190,6 @@ class RealmBot(commands.AutoShardedBot):
             self.ready.set()
             
             logging.info(f"✅ Bot ready as {self.user}")
-            
         except Exception as e:
             logging.error(f"Ready event error: {e}")
             raise
@@ -384,7 +383,7 @@ class CustomCooldown:
         """Remove expired cooldowns periodically"""
         if now - self._last_cleanup < self.cleanup_interval:
             return
-            
+
         for guild_id in list(self._cooldowns.keys()):
             guild_cooldowns = self._cooldowns[guild_id]
             # Remove expired user cooldowns
@@ -648,7 +647,7 @@ async def create_dynamic_command(command_name: str, guild_id: int):
     """Create a dynamic claim command for a guild"""
     guild = bot.get_guild(guild_id)
     if not guild:
-        return
+            return
 
     # Remove existing command if it exists
     try:
@@ -740,9 +739,9 @@ class RealmKeeper(commands.Cog):
                         ephemeral=True
                     )
                     return
-                
+
                 await interaction.response.send_modal(SetupModal())
-                
+
         except TimeoutError:
             await self.handle_interaction_timeout(interaction)
         except Exception as e:
@@ -860,7 +859,7 @@ class RealmKeeper(commands.Cog):
         if (guild_config := config.get(guild_id)) is None:
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
-        
+
         key_count = len(guild_config.main_store)
         guild_config.main_store.clear()
         await key_cache.invalidate(guild_id)
@@ -962,7 +961,6 @@ class RealmKeeper(commands.Cog):
             return False, "❌ Role validation failed!"
 
 class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
-    
     keys = discord.ui.TextInput(
         label="Enter keys to remove (one per line)",
         style=discord.TextStyle.long,
@@ -976,7 +974,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
             guild_id = interaction.guild.id
             if (guild_config := config.get(guild_id)) is None:
                 await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
-            return
+                return
 
             # Validate all keys first
             key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
@@ -990,7 +988,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                         f"❌ Invalid UUID format: {key[:8]}...",
                         ephemeral=True
                     )
-            return
+                    return
 
             # Remove valid keys
             removed = 0
@@ -1009,10 +1007,10 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
 
         except Exception as e:
             logging.error(f"Key removal error: {str(e)}")
-        await interaction.response.send_message(
+            await interaction.response.send_message(
                 "❌ Failed to remove keys!",
-            ephemeral=True
-        )
+                ephemeral=True
+            )
 
 @tasks.loop(hours=1)
 async def cleanup_task():
@@ -1290,15 +1288,15 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                     f"❌ {error}",
                     ephemeral=True
                 )
-                return
-                
+            return
+
             # Continue with key verification...
             
             # Acquire lock for key verification
             if not await key_locks.acquire(guild_id, key_value):
                 await progress_msg.edit(content="❌ System busy, please try again!")
-                return
-                
+            return
+
             try:
                 # Verify key
                 is_valid, updated_hash = await key_security.verify_keys_batch(
@@ -1478,15 +1476,15 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
         super().__init__()
         # Add TextInputs as items
         self.add_item(discord.ui.TextInput(
-            label="Role ID to grant",
-            placeholder="Right-click role -> Copy ID",
-            min_length=17,
-            max_length=20,
+            label="Role Name",
+            placeholder="Enter the exact role name",
+            min_length=1,
+            max_length=100,
             required=True
         ))
         self.add_item(discord.ui.TextInput(
-            label="Command name",
-            placeholder="claim",
+            label="Command Name",
+            placeholder="Enter command name (e.g. claim, verify, redeem)",
             default="claim",
             min_length=1,
             max_length=32,
@@ -1496,21 +1494,63 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             # Get values from inputs
-            role_id = int(self.children[0].value)
+            role_name = self.children[0].value
             command_name = self.children[1].value.lower()
-            
-            # Validate role
-            if not (role := interaction.guild.get_role(role_id)):
+
+            # Check if command name is valid
+            if command_name in RESERVED_NAMES:
                 await interaction.response.send_message(
-                    "❌ Invalid role ID!", 
+                    "❌ That command name is reserved! Please choose another.",
                     ephemeral=True
                 )
                 return
-            
+
+            # Find role by name
+            role = discord.utils.get(interaction.guild.roles, name=role_name)
+            if not role:
+                await interaction.response.send_message(
+                    "❌ Role not found! Please enter the exact role name.",
+                    ephemeral=True
+                )
+                return
+
+            # Validate bot permissions
+            bot_member = interaction.guild.me
+            if not bot_member.guild_permissions.manage_roles:
+                await interaction.response.send_message(
+                    "❌ Bot needs 'Manage Roles' permission!",
+                    ephemeral=True
+                )
+                return
+
+            # Check if bot can manage the role
+            if role >= bot_member.top_role:
+                await interaction.response.send_message(
+                    "❌ Bot's highest role must be above the target role!",
+                    ephemeral=True
+                )
+                return
+
+            # Check if role is managed by integration
+            if role.managed:
+                await interaction.response.send_message(
+                    "❌ Cannot use integration-managed roles!",
+                    ephemeral=True
+                )
+                return
+
+            # Check if role is @everyone
+            if role.is_default():
+                await interaction.response.send_message(
+                    "❌ Cannot use @everyone role!",
+                    ephemeral=True
+                )
+                return
+
             # Create config
             guild_id = interaction.guild.id
             interaction.client.config.guilds[guild_id] = GuildConfig(
-                role_id=role_id,
+                role_id=role.id,
                 command=command_name
             )
             
@@ -1526,15 +1566,10 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
                 ephemeral=True
             )
             
-        except ValueError:
-            await interaction.response.send_message(
-                "❌ Role ID must be a number!", 
-                ephemeral=True
-            )
         except Exception as e:
             logging.error(f"Setup error: {e}")
             await interaction.response.send_message(
-                "❌ Setup failed!", 
+                "❌ Setup failed!",
                 ephemeral=True
             )
 
@@ -1572,7 +1607,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                     ephemeral=True
                 )
                 return
-            
+
             # Add to config
             guild_config = interaction.client.config.guilds.get(guild_id)
             if not guild_config:
@@ -1581,7 +1616,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                     ephemeral=True
                 )
                 return
-            
+
             guild_config.add_keys(valid_keys)
             await interaction.client.config.save()
             
