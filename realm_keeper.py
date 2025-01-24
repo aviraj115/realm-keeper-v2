@@ -1007,21 +1007,24 @@ class RealmKeeper(commands.Cog):
             await interaction.response.send_message("❌ Invalid UUID format! Use UUIDv4.", ephemeral=True)
             return
 
-        expiry_seconds = None
-        if any(KeySecurity.verify_key(key, h)[0] for h in guild_config.main_store):
+        # Check if key exists
+        exists = False
+        for h in guild_config.main_store:
+            if (await KeySecurity.verify_key(key, h))[0]:
+                exists = True
+                break
+                
+        if exists:
             await interaction.response.send_message("❌ Key exists!", ephemeral=True)
             return
 
-        hashed = KeySecurity.hash_key(key, expiry_seconds)
+        hashed = KeySecurity.hash_key(key)
         await guild_config.add_key(hashed, guild_id)
         await interaction.client.config.save()
         stats.log_keys_added(guild_id, 1)
         await audit.log_key_add(interaction, 1)
         
-        msg = "✅ Key added!"
-        if expiry_seconds:
-            msg += f"\n• Expires in: {expiry_seconds} seconds"
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.response.send_message("✅ Key added!", ephemeral=True)
 
     @app_commands.command(name="addkeys", description="🔑 Add multiple keys")
     @app_commands.guild_only()
