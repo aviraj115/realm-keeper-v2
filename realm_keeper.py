@@ -81,21 +81,44 @@ class AdaptiveWorkerPool:
 worker_pool = AdaptiveWorkerPool()
 
 # Initialize bot with optimized connection handling
-bot = commands.AutoShardedBot(
-    command_prefix="!",
-    intents=intents,
-    case_insensitive=True,
-    max_messages=10000,
-    connector=TCPConnector(
-        limit=MAX_CONNECTIONS,
-        ttl_dns_cache=300,
-        force_close=False,
-        enable_cleanup_closed=True
-    ),
-    timeout=HTTP_TIMEOUT,
-    http_retry_count=MAX_RETRIES,
-    loop=loop  # Pass the event loop
-)
+class RealmBot(commands.AutoShardedBot):
+    def __init__(self):
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+            case_insensitive=True,
+            max_messages=10000,
+            timeout=HTTP_TIMEOUT,
+            http_retry_count=MAX_RETRIES
+        )
+        self.connector = None
+        self.realm_keeper = None
+    
+    async def setup_hook(self):
+        """Initialize bot systems"""
+        # Create connector in async context
+        self.connector = TCPConnector(
+            limit=MAX_CONNECTIONS,
+            ttl_dns_cache=300,
+            force_close=False,
+            enable_cleanup_closed=True
+        )
+        self.http._HTTPClient__session._connector = self.connector
+        
+        # Add realm keeper cog
+        self.realm_keeper = RealmKeeper(self)
+        await self.add_cog(self.realm_keeper)
+    
+    async def close(self):
+        """Cleanup on shutdown"""
+        if self.connector:
+            await self.connector.close()
+        await super().close()
+
+async def main():
+    """Main entry point"""
+    async with RealmBot() as bot:
+        await bot.start(TOKEN)
 
 # Configuration handling
 class GuildConfig:
@@ -1606,15 +1629,6 @@ if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
         raise ValueError("Missing DISCORD_TOKEN in environment")
-        
-    try:
-        # Start monitoring
-        monitor_performance.start()
-        
-        # Run bot
-        loop.run_until_complete(bot.start(TOKEN))
-    except KeyboardInterrupt:
-        loop.run_until_complete(bot.close())
-    finally:
-        monitor_performance.cancel()
-        loop.close()
+    
+    # Run main
+    asyncio.run(main())
