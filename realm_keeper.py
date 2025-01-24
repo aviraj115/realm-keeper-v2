@@ -312,6 +312,20 @@ async def on_ready():
         )
     )
     
+    # Register command aliases
+    for cmd_name, aliases in COMMAND_ALIASES.items():
+        cmd = bot.tree.get_command(cmd_name)
+        if cmd:
+            for alias in aliases:
+                bot.tree.add_command(
+                    app_commands.Command(
+                        name=alias,
+                        description=cmd.description,
+                        callback=cmd.callback,
+                        extras=cmd.extras
+                    )
+                )
+    
     await sync_commands()
     logging.info(f"Connected to {len(bot.guilds)} servers")
 
@@ -776,8 +790,27 @@ class AuditLogger:
 
 audit = AuditLogger()
 
+def admin_cooldown():
+    """Cooldown for admin commands"""
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if interaction.user.guild_permissions.administrator:
+            return True
+        retry_after = admin_cd.get_retry_after(interaction)
+        if retry_after:
+            await interaction.response.send_message(
+                f"⏳ Command cooldown. Try again in {int(retry_after)} seconds.",
+                ephemeral=True
+            )
+            return False
+        return True
+    return app_commands.check(predicate)
+
+# Initialize admin cooldown (3 commands per minute)
+admin_cd = CustomCooldown(3, 60)
+
 @bot.tree.command(name="addkey", description="Add single key")
 @app_commands.default_permissions(administrator=True)
+@admin_cooldown()
 async def addkey(interaction: discord.Interaction, key: str, expires_in: Optional[int] = None):
     guild_id = interaction.guild.id
     if (guild_config := config.get(guild_id)) is None:
@@ -817,6 +850,7 @@ async def setup(interaction: discord.Interaction):
 
 @bot.tree.command(name="addkeys", description="📥 Add multiple keys at once")
 @app_commands.default_permissions(administrator=True)
+@admin_cooldown()
 async def addkeys(interaction: discord.Interaction):
     """Add multiple keys in bulk"""
     await interaction.response.send_modal(BulkKeysModal())
@@ -879,6 +913,7 @@ async def clearkeys(interaction: discord.Interaction):
 
 @bot.tree.command(name="removekey", description="🗑️ Remove a specific key")
 @app_commands.default_permissions(administrator=True)
+@admin_cooldown()
 async def removekey(interaction: discord.Interaction, key: str):
     """Remove a specific key"""
     guild_id = interaction.guild.id
@@ -911,6 +946,7 @@ async def removekey(interaction: discord.Interaction, key: str):
 
 @bot.tree.command(name="removekeys", description="🗑️ Remove multiple keys")
 @app_commands.default_permissions(administrator=True)
+@admin_cooldown()
 async def removekeys(interaction: discord.Interaction):
     """Remove multiple keys"""
     await interaction.response.send_modal(RemoveKeysModal())
@@ -937,18 +973,19 @@ async def grimoire(interaction: discord.Interaction):
         color=discord.Color.purple()
     )
     
-    # Admin commands
-    admin = (
-        "`/setup` - Configure the bot for your server\n"
-        "`/addkey` - Add a single key\n"
-        "`/addkeys` - Add multiple keys at once\n"
-        "`/removekey` - Remove a specific key\n"
-        "`/removekeys` - Remove multiple keys\n"
-        "`/clearkeys` - Remove all keys\n"
-        "`/keys` - View key statistics\n"
-        "`/sync` - Force sync commands\n"
-        "`/metrics` - View performance metrics"
-    )
+    # Admin commands with aliases
+    admin_cmds = []
+    for cmd_name in [
+        'setup', 'addkey', 'addkeys', 'removekey', 'removekeys',
+        'clearkeys', 'keys', 'sync', 'metrics'
+    ]:
+        aliases = COMMAND_ALIASES.get(cmd_name, [])
+        cmd_str = f"`/{cmd_name}`"
+        if aliases:
+            cmd_str += f" (aliases: {', '.join(f'`/{a}`' for a in aliases)})"
+        admin_cmds.append(cmd_str)
+    
+    admin = "\n".join(admin_cmds)
     embed.add_field(name="🔧 Admin Commands", value=admin, inline=False)
     
     # User commands
@@ -1018,6 +1055,76 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                 "❌ Failed to remove keys!",
                 ephemeral=True
             )
+
+@bot.tree.command(name="metrics", description="📊 View detailed performance metrics (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def view_metrics(interaction: discord.Interaction):
+    """View detailed performance metrics"""
+    guild_id = interaction.guild.id
+    if (guild_config := config.get(guild_id)) is None:
+        await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
+        return
+        
+    queue_stats = queue_metrics.get_metrics(guild_id)
+    
+    embed = discord.Embed(
+        title="🔍 Performance Metrics",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow()
+    )
+    
+    # Queue stats
+    queue_info = (
+        f"• Processed: {queue_stats['processed']}\n"
+        f"• Errors: {queue_stats['errors']}\n"
+        f"• Current queue: {queue_stats['requests_waiting']}\n"
+        f"• Peak queue: {queue_stats['peak_queue_size']}"
+    )
+    embed.add_field(name="📋 Queue Status", value=queue_info, inline=False)
+    
+    # Timing stats
+    if queue_stats['processed'] > 0:
+        timing = (
+            f"• Average wait: {queue_stats['avg_wait_time']:.2f}s\n"
+            f"• Total wait: {queue_stats['total_wait_time']:.1f}s\n"
+            f"• Last processed: {format_time_ago(time.time() - queue_stats['last_processed'])}"
+        )
+        embed.add_field(name="⏱️ Timing", value=timing, inline=False)
+    
+    # System stats
+    cpu_percent = psutil.cpu_percent()
+    memory = psutil.Process().memory_info()
+    sys_stats = (
+        f"• CPU Usage: {cpu_percent}%\n"
+        f"• Memory: {memory.rss / 1024 / 1024:.1f}MB\n"
+        f"• Active workers: {len(worker_pool.pool._threads)}\n"
+        f"• Queue depth: {len(worker_pool.pool._work_queue.queue)}"
+    )
+    embed.add_field(name="🖥️ System", value=sys_stats, inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+def format_time_ago(seconds: float) -> str:
+    """Format time difference into human readable string"""
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    elif seconds < 3600:
+        return f"{int(seconds/60)}m ago"
+    elif seconds < 86400:
+        return f"{int(seconds/3600)}h ago"
+    else:
+        return f"{int(seconds/86400)}d ago"
+
+# Add near the top with other constants
+COMMAND_ALIASES = {
+    'addkey': ['key', 'newkey', 'createkey'],
+    'addkeys': ['keys', 'newkeys', 'createkeys'],
+    'removekey': ['delkey', 'deletekey'],
+    'removekeys': ['delkeys', 'deletekeys'],
+    'clearkeys': ['purgekeys', 'resetkeys'],
+    'grimoire': ['help', 'guide', 'manual'],
+    'metrics': ['stats', 'performance', 'status']
+}
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
