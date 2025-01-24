@@ -295,6 +295,7 @@ async def on_ready():
     
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     
+    # Restore dynamic commands first
     restored = 0
     for guild_id, guild_config in config.items():
         try:
@@ -305,26 +306,13 @@ async def on_ready():
     
     logging.info(f"Restored {restored} custom commands")
     
+    # Don't try to add command aliases - they should be registered when defining commands
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
             name="for /claim commands"
         )
     )
-    
-    # Register command aliases
-    for cmd_name, aliases in COMMAND_ALIASES.items():
-        cmd = bot.tree.get_command(cmd_name)
-        if cmd:
-            for alias in aliases:
-                bot.tree.add_command(
-                    app_commands.Command(
-                        name=alias,
-                        description=cmd.description,
-                        callback=cmd.callback,
-                        extras=cmd.extras
-                    )
-                )
     
     await sync_commands()
     logging.info(f"Connected to {len(bot.guilds)} servers")
@@ -1115,15 +1103,15 @@ def format_time_ago(seconds: float) -> str:
     else:
         return f"{int(seconds/86400)}d ago"
 
-# Add near the top with other constants
+# Update COMMAND_ALIASES to avoid conflicts with actual commands
 COMMAND_ALIASES = {
-    'addkey': ['key', 'newkey', 'createkey'],
-    'addkeys': ['keys', 'newkeys', 'createkeys'],
-    'removekey': ['delkey', 'deletekey'],
-    'removekeys': ['delkeys', 'deletekeys'],
-    'clearkeys': ['purgekeys', 'resetkeys'],
-    'grimoire': ['help', 'guide', 'manual'],
-    'metrics': ['stats', 'performance', 'status']
+    'addkey': ['newkey', 'createkey', 'genkey'],
+    'addkeys': ['newkeys', 'createkeys', 'genkeys'],
+    'removekey': ['delkey', 'deletekey', 'rmkey'],
+    'removekeys': ['delkeys', 'deletekeys', 'rmkeys'],
+    'clearkeys': ['purgekeys', 'resetkeys', 'wipekeys'],
+    'grimoire': ['guide', 'manual', 'help'],
+    'metrics': ['performance', 'status', 'health']
 }
 
 if __name__ == "__main__":
