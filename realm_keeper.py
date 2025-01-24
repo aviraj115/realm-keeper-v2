@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from typing import Optional, Set, Dict, List
 import threading
+from contextlib import AsyncExitStack as asyncio_timeout  # For Python 3.10 compatibility
 
 # Discord
 import discord
@@ -687,23 +688,40 @@ class RealmKeeper(commands.Cog):
         self.key_security = KeySecurity()
         self.interaction_timeout = 15.0
     
-    async def sync_commands_to_guild(self, guild_id: int) -> bool:
-        """Sync commands to a specific guild"""
+    async def handle_interaction_timeout(self, interaction: discord.Interaction):
+        """Handle interaction timeout gracefully"""
         try:
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                logging.error(f"Could not find guild {guild_id}")
-                return False
-                
-            # Copy global commands to guild
-            self.bot.tree.copy_global_to(guild=guild)
-            await self.bot.tree.sync(guild=guild)
-            logging.info(f"Synced commands to guild: {guild.name}")
-            return True
-            
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "⌛ Operation timed out, please try again.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "⌛ Operation timed out, please try again.",
+                    ephemeral=True
+                )
         except Exception as e:
-            logging.error(f"Failed to sync commands to guild {guild_id}: {e}")
-            return False
+            logging.error(f"Timeout handler error: {e}")
+    
+    async def handle_interaction_error(self, interaction: discord.Interaction, error: Exception, message: str = None):
+        """Handle interaction errors gracefully"""
+        try:
+            error_msg = message or "An error occurred!"
+            logging.error(f"Interaction error: {error}", exc_info=error)
+            
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ {error_msg}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"❌ {error_msg}",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logging.error(f"Error handler failed: {e}", exc_info=e)
     
     @app_commands.command(name="setup", description="⚙️ Initial server setup")
     @app_commands.guild_only()
@@ -711,7 +729,10 @@ class RealmKeeper(commands.Cog):
     async def setup(self, interaction: discord.Interaction):
         """Initial server setup"""
         try:
-            async with asyncio.timeout(self.interaction_timeout):
+            # Use asyncio_timeout instead of asyncio.timeout
+            async with asyncio_timeout() as timeout:
+                timeout.timeout = self.interaction_timeout
+                
                 # Check bot permissions
                 if not interaction.guild.me.guild_permissions.manage_roles:
                     await interaction.response.send_message(
@@ -722,6 +743,8 @@ class RealmKeeper(commands.Cog):
                 
                 await interaction.response.send_modal(SetupModal())
                 
+        except TimeoutError:
+            await self.handle_interaction_timeout(interaction)
         except Exception as e:
             await self.handle_interaction_error(interaction, e, "Setup failed!")
     
