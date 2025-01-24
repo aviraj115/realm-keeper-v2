@@ -822,7 +822,6 @@ class RealmKeeper(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.worker_pool = AdaptiveWorkerPool(min_workers=4, max_workers=16)
-        self.key_security = KeySecurity()
         self.interaction_timeout = 15.0
     
     async def handle_interaction_timeout(self, interaction: discord.Interaction):
@@ -1190,44 +1189,39 @@ class KeySecurity:
     DELIMITER = "||"
     HASH_PREFIX_LENGTH = 7
     HASH_ROUNDS = 10
+    _salt = None
+    _metrics = defaultdict(lambda: {
+        'hashes': 0,
+        'verifications': 0,
+        'failures': 0,
+        'avg_verify_time': 0.0
+    })
     
-    def __init__(self):
-        self.salt = self._load_or_generate_salt()
-        self.worker_pool = ThreadPoolExecutor(
-            max_workers=max(8, os.cpu_count() * 2),
-            thread_name_prefix="key-verify"
-        )
-        self.metrics = defaultdict(lambda: {
-            'hashes': 0,
-            'verifications': 0,
-            'failures': 0,
-            'avg_verify_time': 0.0
-        })
+    @classmethod
+    def _get_salt(cls) -> bytes:
+        """Get or generate salt with proper error handling"""
+        if cls._salt is None:
+            try:
+                # Try to load from environment
+                if salt := os.getenv('HASH_SALT'):
+                    cls._salt = base64.b64decode(salt)
+                else:
+                    # Generate new salt
+                    cls._salt = secrets.token_bytes(16)
+                    encoded = base64.b64encode(cls._salt).decode()
+                    
+                    # Save to .env file
+                    with open('.env', 'a') as f:
+                        f.write(f"\nHASH_SALT={encoded}")
+                    
+                    logging.warning("Generated new HASH_SALT")
+            except Exception as e:
+                logging.error(f"Salt initialization error: {str(e)}")
+                cls._salt = secrets.token_bytes(16)  # Use fallback salt
+        return cls._salt
     
-    def _load_or_generate_salt(self) -> bytes:
-        """Load or generate salt with proper error handling"""
-        try:
-            # Try to load from environment
-            if salt := os.getenv('HASH_SALT'):
-                return base64.b64decode(salt)
-            
-            # Generate new salt
-            new_salt = secrets.token_bytes(16)
-            encoded = base64.b64encode(new_salt).decode()
-            
-            # Save to .env file
-            with open('.env', 'a') as f:
-                f.write(f"\nHASH_SALT={encoded}")
-            
-            logging.warning("Generated new HASH_SALT")
-            return new_salt
-            
-        except Exception as e:
-            logging.error(f"Salt initialization error: {str(e)}")
-            # Use fallback salt in emergency
-            return secrets.token_bytes(16)
-    
-    def hash_key(self, key: str, expiry_seconds: Optional[int] = None) -> str:
+    @classmethod
+    def hash_key(cls, key: str, expiry_seconds: Optional[int] = None) -> str:
         """Hash a key with metadata"""
         try:
             # Prepare metadata
@@ -1236,35 +1230,36 @@ class KeySecurity:
                 meta['exp'] = time.time() + expiry_seconds
             
             # Add salt and hash
-            salted_key = f"{key}{self.salt.hex()}"
-            hash_str = bcrypt_sha256.hash(salted_key, rounds=self.HASH_ROUNDS)
+            salted_key = f"{key}{cls._get_salt().hex()}"
+            hash_str = bcrypt_sha256.hash(salted_key, rounds=cls.HASH_ROUNDS)
             
             # Add metadata if needed
             if meta:
-                return f"{hash_str}{self.DELIMITER}{json.dumps(meta)}"
+                return f"{hash_str}{cls.DELIMITER}{json.dumps(meta)}"
             return hash_str
             
         except Exception as e:
             logging.error(f"Hash error: {str(e)}")
             raise
     
-    def verify_key(self, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
+    @classmethod
+    def verify_key(cls, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
         """Verify a key against a hash, returns (is_valid, updated_hash)"""
         try:
             # Split hash and metadata
-            hash_str = full_hash.split(self.DELIMITER)[0]
+            hash_str = full_hash.split(cls.DELIMITER)[0]
             
             # Check expiration if present
-            if self.DELIMITER in full_hash:
+            if cls.DELIMITER in full_hash:
                 try:
-                    meta = json.loads(full_hash.split(self.DELIMITER)[1])
+                    meta = json.loads(full_hash.split(cls.DELIMITER)[1])
                     if meta.get('exp', float('inf')) < time.time():
                         return False, None
                 except json.JSONDecodeError:
                     return False, None
             
             # Verify hash
-            salted_key = f"{key}{self.salt.hex()}"
+            salted_key = f"{key}{cls._get_salt().hex()}"
             try:
                 if bcrypt_sha256.verify(salted_key, hash_str):
                     return True, full_hash
@@ -1466,7 +1461,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
 
             try:
                 # Verify key
-                is_valid, updated_hash = await key_security.verify_keys_batch(
+                is_valid, updated_hash = await KeySecurity.verify_keys_batch(
                     key_value, 
                     possible_hashes,
                     chunk_size=20
@@ -1475,7 +1470,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 if is_valid:
                     # Update key storage under lock
                     for full_hash in possible_hashes:
-                        if await key_security.verify_key(key_value, full_hash)[0]:
+                        if await KeySecurity.verify_key(key_value, full_hash)[0]:
                             await guild_config.remove_key(full_hash, guild_id)
                             if updated_hash:
                                 await guild_config.add_key(updated_hash, guild_id)
