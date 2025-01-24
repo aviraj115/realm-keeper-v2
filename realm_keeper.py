@@ -1067,12 +1067,6 @@ async def cleanup_task():
                         # Check expiration
                         if meta_data.get('exp', float('inf')) < time.time():
                             expired.add(full_hash)
-                            continue
-                            
-                        # Check uses
-                        if meta_data.get('uses', 1) <= 0:
-                            expired.add(full_hash)
-                            continue
                             
                     except json.JSONDecodeError:
                         invalid.add(full_hash)
@@ -1082,16 +1076,6 @@ async def cleanup_task():
                 guild_config.main_store -= (expired | invalid)
                 await key_cache.invalidate(guild_id)
                 
-                logging.info(
-                    f"Guild {guild_id} cleanup:\n"
-                    f"• Expired: {len(expired)}\n"
-                    f"• Invalid: {len(invalid)}\n"
-                    f"• Remaining: {len(guild_config.main_store)}"
-                )
-        
-        # Save changes
-        await save_config()
-        
     except Exception as e:
         logging.error(f"Cleanup error: {str(e)}")
 
@@ -1452,12 +1436,12 @@ class KeyValidator:
 
 @tasks.loop(minutes=5)
 async def save_stats_task():
-    """Save performance statistics periodically"""
+    """Save bot statistics periodically"""
     try:
         stats = {
             'system': {
+                'memory': psutil.Process().memory_info().rss,
                 'cpu': psutil.cpu_percent(),
-                'memory': psutil.Process().memory_info().rss / 1024 / 1024,
                 'uptime': time.time() - start_time
             },
             'discord': {
@@ -1466,8 +1450,8 @@ async def save_stats_task():
                 'users': sum(g.member_count for g in bot.guilds)
             },
             'keys': {
-                'total': sum(len(cfg.main_store) for cfg in config.values()),
-                'guilds': len(config)
+                'total': sum(len(cfg.main_store) for cfg in bot.config.guilds.values()),
+                'guilds': len(bot.config.guilds)
             }
         }
         
@@ -1493,7 +1477,8 @@ async def memory_check():
 async def monitor_workers():
     """Monitor and adjust worker pools"""
     try:
-        for guild_id, guild_config in config.items():
+        for guild_id, guild_config in bot.config.guilds.items():
+            worker_pool = bot.realm_keeper.worker_pool
             queue_size = worker_pool.pool._work_queue.qsize()
             active_workers = len(worker_pool.pool._threads)
             
