@@ -1057,7 +1057,7 @@ async def removekey(interaction: discord.Interaction, key: str):
 
     if removed:
         await save_config()
-    await interaction.response.send_message("✅ Key removed!", ephemeral=True)
+        await interaction.response.send_message("✅ Key removed!", ephemeral=True)
     else:
         await interaction.response.send_message("❌ Key not found!", ephemeral=True)
 
