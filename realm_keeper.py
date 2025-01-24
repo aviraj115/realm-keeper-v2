@@ -53,6 +53,33 @@ HTTP_TIMEOUT = ClientTimeout(total=30, connect=10)
 MAX_RETRIES = 3
 MAX_CONNECTIONS = 100
 
+# Initialize worker pool
+class AdaptiveWorkerPool:
+    def __init__(self, min_workers: int = 4, max_workers: int = 32):
+        self.min_workers = min_workers
+        self.max_workers = max_workers
+        self.pool = ThreadPoolExecutor(
+            max_workers=min_workers,
+            thread_name_prefix="worker"
+        )
+        
+    def scale_up(self):
+        """Increase worker count"""
+        current = len(self.pool._threads)
+        if current < self.max_workers:
+            new_size = min(current + 2, self.max_workers)
+            self.pool._max_workers = new_size
+            
+    def scale_down(self):
+        """Decrease worker count"""
+        current = len(self.pool._threads)
+        if current > self.min_workers:
+            new_size = max(current - 1, self.min_workers)
+            self.pool._max_workers = new_size
+
+# Initialize worker pool
+worker_pool = AdaptiveWorkerPool()
+
 # Initialize bot with optimized connection handling
 bot = commands.AutoShardedBot(
     command_prefix="!",
@@ -1581,8 +1608,13 @@ if __name__ == "__main__":
         raise ValueError("Missing DISCORD_TOKEN in environment")
         
     try:
+        # Start monitoring
+        monitor_performance.start()
+        
+        # Run bot
         loop.run_until_complete(bot.start(TOKEN))
     except KeyboardInterrupt:
         loop.run_until_complete(bot.close())
     finally:
+        monitor_performance.cancel()
         loop.close()
