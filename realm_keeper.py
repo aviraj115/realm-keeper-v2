@@ -557,6 +557,8 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 wait=True
             )
             
+            start_time = time.time()
+            
             guild_id = interaction.guild.id
             user = interaction.user
             key_value = self.key.value.strip()
@@ -575,7 +577,10 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 await progress_msg.edit(content="❌ Invalid key format!")
                 return
 
-            # Verify and process key
+            # Add queue size tracking
+            queue_size = len(worker_pool.pool._work_queue._queue)
+            await queue_metrics.update_queue_size(guild_id, queue_size)
+            
             async with key_locks[guild_id][get_shard(user.id)]:
                 # Try direct verification first
                 for full_hash in guild_config.main_store:
@@ -588,16 +593,22 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                             await guild_config.add_key(updated_hash, guild_id)
                         await save_config()
                         
+                        # Track successful processing
+                        process_time = time.time() - start_time
+                        await queue_metrics.update(guild_id, process_time)
+                        
                         # Grant role and send success message
                         role = interaction.guild.get_role(guild_config.role_id)
-                        await user.add_roles(role)
                         success_msg = random.choice(guild_config.success_msgs)
                         await progress_msg.edit(
                             content=success_msg.format(
                                 user=user.mention,
-                                role=role.name
+                                role=f"<@&{role.id}>"
                             )
                         )
+                        claim_time = time.time() - start_time
+                        stats.log_claim(guild_id, True, claim_time)
+                        await audit.log_claim(interaction, key_value[:8], True)
                         return
 
                 # No valid matches found
