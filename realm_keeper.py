@@ -354,6 +354,7 @@ async def cleanup_task():
 
 @tasks.loop(minutes=5)
 async def save_stats_task():
+    """Periodically save stats to file"""
     try:
         await stats.save_stats()
     except Exception as e:
@@ -582,11 +583,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
             
             # Verify in parallel
             async with key_locks[guild_id][get_shard(user.id)]:
-                is_valid, updated_hash = await KeySecurity.verify_keys_parallel(
-                    key_value, 
-                    possible_hashes,
-                    guild_config
-                )
+                is_valid, updated_hash = await KeySecurity.verify_keys_parallel(key_value, possible_hashes)
 
                 if not is_valid:
                     stats.log_claim(guild_id, False)
@@ -594,12 +591,16 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                     await progress_msg.edit(content="❌ Invalid key or already claimed!")
                     return
 
-                # Handle key updates/removal
-                matching_hash = next(h for h in possible_hashes if key_security.verify_key(key_value, h))
-                if updated_hash != matching_hash:  # Key was modified or used up
-                    await guild_config.remove_key(matching_hash, guild_id)
-                    if updated_hash:  # Key still has uses left
-                        await guild_config.add_key(updated_hash, guild_id)
+                # Find the matching hash
+                for full_hash in possible_hashes:
+                    if await KeySecurity.verify_key_async(key_value, full_hash) == (True, updated_hash):
+                        # Remove the old hash
+                        await guild_config.remove_key(full_hash, guild_id)
+                        # Add updated hash if key still has uses
+                        if updated_hash:
+                            await guild_config.add_key(updated_hash, guild_id)
+                        break
+
                 await save_config()
 
             role = interaction.guild.get_role(guild_config.role_id)
@@ -642,57 +643,29 @@ class KeySecurity:
         return f"{hash_str}{KeySecurity.DELIMITER}{json.dumps(metadata)}" if metadata else hash_str
 
     @staticmethod
-    def verify_key(key: str, full_hash: str, guild_config: GuildConfig = None) -> bool:
+    def verify_key(key: str, full_hash: str) -> tuple[bool, Optional[str]]:
+        """Verify key and return (is_valid, updated_hash)"""
         try:
             uuid_obj = uuid.UUID(key, version=4)
             if str(uuid_obj) != key.lower():
-                return False
-                
-            if KeySecurity.DELIMITER in full_hash:
-                hash_part, meta_part = full_hash.split(KeySecurity.DELIMITER, 1)
-                metadata = json.loads(meta_part)
-                
-                if metadata.get('exp') and metadata['exp'] < time.time():
-                    return False
-                
-                if 'uses' in metadata:
-                    if metadata['uses'] <= 0:
-                        return False
-                    if guild_config:
-                        metadata['uses'] -= 1
-                        new_hash = f"{hash_part}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
-                        guild_config.main_store.discard(full_hash)
-                        if metadata['uses'] > 0:
-                            guild_config.main_store.add(new_hash)
-                
-                return bcrypt_sha256.verify(key, hash_part)
-            else:
-                return bcrypt_sha256.verify(key, full_hash)
-        except (ValueError, Exception):
-            return False
-
-    @staticmethod
-    async def verify_key_async(key: str, full_hash: str, guild_config: GuildConfig = None) -> tuple[bool, Optional[str]]:
-        """Verify key and handle metadata, returning (is_valid, updated_hash)"""
-        loop = asyncio.get_event_loop()
-        try:
-            result = await loop.run_in_executor(
-                worker_pool.pool,
-                KeySecurity.verify_key,
-                key,
-                full_hash,
-                guild_config
-            )
-            
-            if not result:
                 return False, None
                 
-            # Handle metadata updates
             if KeySecurity.DELIMITER in full_hash:
                 hash_part, meta_part = full_hash.split(KeySecurity.DELIMITER, 1)
                 metadata = json.loads(meta_part)
                 
-                if metadata.get('uses') is not None:
+                # Check expiry
+                if metadata.get('exp') and metadata['exp'] < time.time():
+                    return False, None
+                
+                # Verify hash
+                if not bcrypt_sha256.verify(key, hash_part):
+                    return False, None
+                
+                # Handle uses
+                if 'uses' in metadata:
+                    if metadata['uses'] <= 0:
+                        return False, None
                     metadata['uses'] -= 1
                     if metadata['uses'] > 0:
                         # Key still has uses left
@@ -700,25 +673,38 @@ class KeySecurity:
                     # Key used up
                     return True, None
                     
-            return True, full_hash
-            
-        except Exception:
+                return True, full_hash
+            else:
+                return bcrypt_sha256.verify(key, full_hash), full_hash
+                
+        except (ValueError, Exception):
             return False, None
 
     @staticmethod
-    async def verify_keys_parallel(key: str, hashes: Set[str], guild_config: GuildConfig = None) -> tuple[bool, Optional[str]]:
+    async def verify_key_async(key: str, full_hash: str) -> tuple[bool, Optional[str]]:
+        """Async wrapper for verify_key"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            worker_pool.pool,
+            KeySecurity.verify_key,
+            key,
+            full_hash
+        )
+
+    @staticmethod
+    async def verify_keys_parallel(key: str, hashes: Set[str]) -> tuple[bool, Optional[str]]:
         """Verify key against multiple hashes in parallel"""
         if not hashes:
             return False, None
             
         # Create verification tasks
-        tasks = {
-            asyncio.create_task(KeySecurity.verify_key_async(key, full_hash, guild_config)): full_hash
+        tasks = [
+            asyncio.create_task(KeySecurity.verify_key_async(key, full_hash))
             for full_hash in hashes
-        }
+        ]
         
         # Wait for first match or all failures
-        for done_task in asyncio.as_completed(tasks.keys()):
+        for done_task in asyncio.as_completed(tasks):
             try:
                 is_valid, updated_hash = await done_task
                 if is_valid:
@@ -726,9 +712,7 @@ class KeySecurity:
                     for task in tasks:
                         if not task.done():
                             task.cancel()
-                            
-                    matching_hash = tasks[done_task]
-                    return True, updated_hash or matching_hash  # Use updated hash if available
+                    return True, updated_hash
             except asyncio.CancelledError:
                 pass
                 
@@ -793,6 +777,30 @@ class Stats:
             'fastest_claim': float('inf'),
             'slowest_claim': 0
         })
+        self.load_stats()  # Load existing stats on init
+    
+    async def save_stats(self):
+        """Save stats to file"""
+        try:
+            async with aiofiles.open('stats.json', 'w') as f:
+                await f.write(json.dumps({
+                    str(guild_id): stats 
+                    for guild_id, stats in self.guild_stats.items()
+                }, indent=4))
+        except Exception as e:
+            logging.error(f"Failed to save stats: {str(e)}")
+    
+    def load_stats(self):
+        """Load stats from file"""
+        try:
+            with open('stats.json', 'r') as f:
+                data = json.loads(f.read())
+                for guild_id, stats in data.items():
+                    self.guild_stats[int(guild_id)].update(stats)
+        except FileNotFoundError:
+            pass  # No stats file yet
+        except Exception as e:
+            logging.error(f"Failed to load stats: {str(e)}")
     
     def log_claim(self, guild_id: int, success: bool, time_taken: float = None):
         stats = self.guild_stats[guild_id]
@@ -870,7 +878,7 @@ async def addkey(interaction: discord.Interaction, key: str, expires_in: Optiona
 
     expiry_seconds = expires_in * 3600 if expires_in else None
     
-    if any(key_security.verify_key(key, h) for h in guild_config.main_store):
+    if any(KeySecurity.verify_key(key, h)[0] for h in guild_config.main_store):
         await interaction.response.send_message("❌ Key exists!", ephemeral=True)
         return
 
@@ -976,7 +984,7 @@ async def removekey(interaction: discord.Interaction, key: str):
     # Find and remove key
     removed = False
     for full_hash in list(guild_config.main_store):
-        if key_security.verify_key(key, full_hash):
+        if KeySecurity.verify_key(key, full_hash)[0]:
             await guild_config.remove_key(full_hash, guild_id)
             removed = True
             break
@@ -1081,7 +1089,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
             removed = 0
             for key in key_list:
                 for full_hash in list(guild_config.main_store):
-                    if key_security.verify_key(key, full_hash):
+                    if KeySecurity.verify_key(key, full_hash)[0]:
                         await guild_config.remove_key(full_hash, guild_id)
                         removed += 1
                         break
