@@ -343,7 +343,7 @@ class RealmBot(commands.AutoShardedBot):
             # Set custom activity
             activity = discord.Activity(
                 type=discord.ActivityType.watching,
-                name="over mystical realms ✨"
+                name="for ✨ mystical keys"
             )
             await self.change_presence(activity=activity)
             
