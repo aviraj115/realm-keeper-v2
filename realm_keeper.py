@@ -1165,6 +1165,77 @@ COMMAND_ALIASES = {
     'metrics': ['performance', 'status', 'health']
 }
 
+class BulkKeysModal(discord.ui.Modal, title="Add Multiple Keys"):
+    keys = discord.ui.TextInput(
+        label="Enter keys (one per line)",
+        style=discord.TextStyle.long,
+        placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+        required=True,
+        max_length=2000
+    )
+    
+    expires_in = discord.ui.TextInput(
+        label="Expiry time in hours (optional)",
+        style=discord.TextStyle.short,
+        required=False,
+        placeholder="24"
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            progress_msg = await interaction.followup.send(
+                "🔮 Processing keys...", 
+                ephemeral=True,
+                wait=True
+            )
+            
+            guild_id = interaction.guild.id
+            if (guild_config := config.get(guild_id)) is None:
+                await progress_msg.edit(content="❌ Run /setup first!")
+                return
+
+            # Parse expiry time
+            expiry_seconds = None
+            if self.expires_in.value:
+                try:
+                    hours = float(self.expires_in.value)
+                    expiry_seconds = int(hours * 3600)
+                except ValueError:
+                    await progress_msg.edit(content="❌ Invalid expiry time!")
+                    return
+
+            # Validate and hash keys
+            key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
+            valid_hashes = set()
+            
+            for key in key_list:
+                try:
+                    uuid_obj = uuid.UUID(key, version=4)
+                    if str(uuid_obj) != key.lower():
+                        raise ValueError()
+                    valid_hashes.add(KeySecurity.hash_key(key, expiry_seconds))
+                except ValueError:
+                    await progress_msg.edit(
+                        content=f"❌ Invalid UUID format: {key[:8]}...\nKeys must be UUIDv4 format!"
+                    )
+                    return
+
+            # Add valid keys
+            await guild_config.bulk_add_keys(valid_hashes, guild_id)
+            await save_config()
+            stats.log_keys_added(guild_id, len(valid_hashes))
+            await audit.log_key_add(interaction, len(valid_hashes))
+            
+            msg = f"✅ Added {len(valid_hashes)} keys!"
+            if expiry_seconds:
+                msg += f"\n• Expires in: {self.expires_in.value} hours"
+            await progress_msg.edit(content=msg)
+            
+        except Exception as e:
+            logging.error(f"Bulk key add error: {str(e)}")
+            await progress_msg.edit(content="❌ Failed to add keys!")
+
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
