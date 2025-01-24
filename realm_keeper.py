@@ -945,7 +945,7 @@ class RealmKeeper(commands.Cog):
     @app_commands.command(name="setup", description="⚙️ Initial server setup")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    async def setup(self, interaction: discord.Interaction):
+    async def setup(self, interaction: discord.Interaction, file: discord.Attachment = None):
         """Initial server setup"""
         try:
             # Use asyncio_timeout instead of asyncio.timeout
@@ -960,7 +960,36 @@ class RealmKeeper(commands.Cog):
                     )
                     return
 
-                await interaction.response.send_modal(SetupModal())
+                # Store file content if provided
+                initial_keys = []
+                if file:
+                    if not file.filename.endswith('.txt'):
+                        await interaction.response.send_message(
+                            "❌ Please provide a .txt file!",
+                            ephemeral=True
+                        )
+                        return
+                        
+                    if file.size > 10 * 1024 * 1024:  # 10MB limit
+                        await interaction.response.send_message(
+                            "❌ File too large! Maximum size is 10MB.",
+                            ephemeral=True
+                        )
+                        return
+
+                    # Read file content
+                    content = await file.read()
+                    try:
+                        text = content.decode('utf-8')
+                        initial_keys = [k.strip() for k in text.split('\n') if k.strip()]
+                    except UnicodeDecodeError:
+                        await interaction.response.send_message(
+                            "❌ Invalid file encoding! Please use UTF-8.",
+                            ephemeral=True
+                        )
+                        return
+
+                await interaction.response.send_modal(SetupModal(initial_keys))
 
         except TimeoutError:
             await self.handle_interaction_timeout(interaction)
@@ -1871,45 +1900,27 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 )
                 return
 
-            # Quick check using Bloom filter
-            if key_value not in guild_config.bloom:
-                stats.log_claim(guild_id, False)
-                await audit.log_claim(interaction, False)
-                await interaction.followup.send(
-                    "🌑 This key holds no power in these lands...", 
-                    ephemeral=True
-                )
-                return
-
-            # Check cache for potential matches
-            matches = await key_cache.get_matches(guild_id, key_value)
-            if matches is None:
-                # Cache miss - check all keys
-                matches = guild_config.main_store
-
-            # Verify key in batches
-            key_found = False
-            valid_hash = None
-            
-            # Create batches of hashes to verify
-            verifications = [(key_value, h) for h in matches]
-            results = await KeySecurity.verify_keys_batch(verifications)
-
-            # Process results
-            for i, is_valid in enumerate(results):
-                if is_valid:
-                    key_found = True
-                    valid_hash = verifications[i][1]
-                    break
-
-            if key_found and valid_hash:
-                # Remove key and grant role
-                await guild_config.remove_key(valid_hash, guild_id)
+            # Direct hash lookup first
+            key_hash = KeySecurity.hash_key(key_value)
+            if key_hash in guild_config.main_store:
+                # Key found directly - remove and grant role
+                await guild_config.remove_key(key_hash, guild_id)
                 await interaction.client.config.save()
                 
-                # Add role
                 try:
                     await interaction.user.add_roles(role)
+                    stats.log_claim(guild_id, True)
+                    await audit.log_claim(interaction, True)
+                    
+                    success_msg = random.choice(guild_config.success_msgs)
+                    await interaction.followup.send(
+                        success_msg.format(
+                            user=interaction.user.mention,
+                            role=role.mention
+                        ),
+                        ephemeral=True
+                    )
+                    return
                 except discord.Forbidden:
                     await interaction.followup.send(
                         "🔒 The mystical barriers prevent me from bestowing this power!", 
@@ -1923,20 +1934,64 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                         ephemeral=True
                     )
                     return
-                
-                # Log success
-                stats.log_claim(guild_id, True)
-                await audit.log_claim(interaction, True)
-                
-                # Send success message
-                success_msg = random.choice(guild_config.success_msgs)
+
+            # If not found directly, check Bloom filter
+            if key_value not in guild_config.bloom:
+                stats.log_claim(guild_id, False)
+                await audit.log_claim(interaction, False)
                 await interaction.followup.send(
-                    success_msg.format(
-                        user=interaction.user.mention,
-                        role=role.mention
-                    ),
+                    "🌑 This key holds no power in these lands...", 
                     ephemeral=True
                 )
+                return
+
+            # Final check with cache and batch verification
+            matches = await key_cache.get_matches(guild_id, key_value)
+            if matches is None:
+                matches = guild_config.main_store
+
+            # Verify in parallel batches
+            verifications = [(key_value, h) for h in matches]
+            results = await KeySecurity.verify_keys_batch(verifications)
+
+            # Process results
+            key_found = False
+            valid_hash = None
+            for i, is_valid in enumerate(results):
+                if is_valid:
+                    key_found = True
+                    valid_hash = verifications[i][1]
+                    break
+
+            if key_found and valid_hash:
+                # Remove key and grant role
+                await guild_config.remove_key(valid_hash, guild_id)
+                await interaction.client.config.save()
+                
+                try:
+                    await interaction.user.add_roles(role)
+                    stats.log_claim(guild_id, True)
+                    await audit.log_claim(interaction, True)
+                    
+                    success_msg = random.choice(guild_config.success_msgs)
+                    await interaction.followup.send(
+                        success_msg.format(
+                            user=interaction.user.mention,
+                            role=role.mention
+                        ),
+                        ephemeral=True
+                    )
+                except discord.Forbidden:
+                    await interaction.followup.send(
+                        "🔒 The mystical barriers prevent me from bestowing this power!", 
+                        ephemeral=True
+                    )
+                except Exception as e:
+                    logging.error(f"Role grant error: {str(e)}")
+                    await interaction.followup.send(
+                        "💔 The ritual of bestowal has failed!", 
+                        ephemeral=True
+                    )
             else:
                 stats.log_claim(guild_id, False)
                 await audit.log_claim(interaction, False)
@@ -2141,8 +2196,9 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 pass
 
 class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
-    def __init__(self):
+    def __init__(self, initial_keys=None):
         super().__init__()
+        self.initial_keys = initial_keys or []
         self.add_item(discord.ui.TextInput(
             label="✨ Role Name",
             placeholder="Enter the exact role name to grant",
@@ -2158,13 +2214,14 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             max_length=32,
             required=True
         ))
-        self.add_item(discord.ui.TextInput(
-            label="🗝️ Initial Keys",
-            style=discord.TextStyle.paragraph,
-            placeholder="Optional: Paste your keys here (UUIDs, one per line)",
-            required=False,
-            max_length=4000  # Increased to handle more keys
-        ))
+        if not initial_keys:
+            self.add_item(discord.ui.TextInput(
+                label="🗝️ Initial Keys",
+                style=discord.TextStyle.paragraph,
+                placeholder="Optional: Paste your keys here (UUIDs, one per line)",
+                required=False,
+                max_length=4000
+            ))
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -2174,7 +2231,12 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             # Get values from inputs
             role_name = self.children[0].value
             command_name = self.children[1].value.lower()
-            initial_keys = [k.strip() for k in self.children[2].value.split('\n') if k.strip()] if self.children[2].value.strip() else []
+            
+            # Get initial keys from either text input or file
+            if self.initial_keys:
+                initial_keys = self.initial_keys
+            else:
+                initial_keys = [k.strip() for k in self.children[2].value.split('\n') if k.strip()] if len(self.children) > 2 and self.children[2].value.strip() else []
 
             # Check if command name is valid
             if command_name in RESERVED_NAMES:
