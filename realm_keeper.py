@@ -684,22 +684,22 @@ class KeySecurity:
         if not hashes:
             return False, None
             
-        # Create verification tasks
-        tasks = [
-            asyncio.create_task(KeySecurity.verify_key_async(key, full_hash, guild_config))
+        # Create verification tasks with hash mapping
+        tasks = {
+            asyncio.create_task(KeySecurity.verify_key_async(key, full_hash, guild_config)): full_hash
             for full_hash in hashes
-        ]
+        }
         
         # Wait for first match or all failures
-        matching_hash = None
-        for done_task in asyncio.as_completed(tasks):
+        for done_task in asyncio.as_completed(tasks.keys()):
             try:
                 if await done_task:
+                    matching_hash = tasks[done_task]
                     # Cancel remaining tasks
                     for task in tasks:
                         if not task.done():
                             task.cancel()
-                    return True, full_hash
+                    return True, matching_hash
             except asyncio.CancelledError:
                 pass
                 
