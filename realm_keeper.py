@@ -435,14 +435,20 @@ class GuildConfig:
             mode=ScalableBloomFilter.SMALL_SET_GROWTH
         )
         for full_hash in self.main_store:
-            hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
-            self.bloom.add(hash_part)
+            # Add both the full hash and the key part to the bloom filter
+            self.bloom.add(full_hash)
+            if KeySecurity.DELIMITER in full_hash:
+                key_part = full_hash.split(KeySecurity.DELIMITER)[0]
+                self.bloom.add(key_part)
     
     async def add_key(self, full_hash: str, guild_id: int):
         """Add a key with Bloom filter update"""
         self.main_store.add(full_hash)
-        hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
-        self.bloom.add(hash_part)
+        # Add both the full hash and the key part to the bloom filter
+        self.bloom.add(full_hash)
+        if KeySecurity.DELIMITER in full_hash:
+            key_part = full_hash.split(KeySecurity.DELIMITER)[0]
+            self.bloom.add(key_part)
         await key_cache.invalidate(guild_id)
     
     async def remove_key(self, full_hash: str, guild_id: int):
@@ -453,20 +459,13 @@ class GuildConfig:
     
     async def bulk_add_keys(self, hashes: Set[str], guild_id: int):
         """Add multiple keys efficiently"""
-        # Ensure all hashes are properly formatted
-        formatted_hashes = set()
-        for h in hashes:
-            if KeySecurity.DELIMITER in h:
-                formatted_hashes.add(h)
-            else:
-                formatted_hashes.add(h)
-        
-        self.main_store.update(formatted_hashes)
-        # Update Bloom filter with key parts
-        for full_hash in formatted_hashes:
-            hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
-            self.bloom.add(hash_part)
-        
+        self.main_store.update(hashes)
+        # Update Bloom filter with both full hashes and key parts
+        for full_hash in hashes:
+            self.bloom.add(full_hash)
+            if KeySecurity.DELIMITER in full_hash:
+                key_part = full_hash.split(KeySecurity.DELIMITER)[0]
+                self.bloom.add(key_part)
         await key_cache.invalidate(guild_id)
     
     # Alias for compatibility
@@ -1577,7 +1576,7 @@ class KeySecurity:
             # Normalize key format
             key = key.strip().lower()
             
-            # Add salt and hash with reduced rounds
+            # Add salt and hash
             salted_key = f"{key}{cls._get_salt().hex()}"
             hash_str = bcrypt_sha256.hash(salted_key, rounds=cls.HASH_ROUNDS)
             
@@ -1908,61 +1907,28 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 )
                 return
 
-            # Try direct hash lookup first
+            # Generate hash for the key
             key_hash = KeySecurity.hash_key(key_value)
-            if key_hash in guild_config.main_store:
-                # Key found - remove and grant role
-                await guild_config.remove_key(key_hash, guild_id)
-                await interaction.client.config.save()
-                
-                try:
-                    await interaction.user.add_roles(role)
-                    stats.log_claim(guild_id, True)
-                    await audit.log_claim(interaction, True)
-                    
-                    success_msg = random.choice(guild_config.success_msgs)
-                    await interaction.followup.send(
-                        success_msg.format(
-                            user=interaction.user.mention,
-                            role=role.mention
-                        ),
-                        ephemeral=True
-                    )
-                    return
-                except discord.Forbidden:
-                    await interaction.followup.send(
-                        "🔒 The mystical barriers prevent me from bestowing this power!", 
-                        ephemeral=True
-                    )
-                    return
-                except Exception as e:
-                    logging.error(f"Role grant error: {str(e)}")
-                    await interaction.followup.send(
-                        "💔 The ritual of bestowal has failed!", 
-                        ephemeral=True
-                    )
-                    return
-
-            # If not found directly, check Bloom filter
-            if key_value not in guild_config.bloom:
-                stats.log_claim(guild_id, False)
-                await audit.log_claim(interaction, False)
-                await interaction.followup.send(
-                    "🌑 This key holds no power in these lands...", 
-                    ephemeral=True
-                )
-                return
-
-            # Final verification attempt
+            
+            # Check if the key exists in any form
             key_found = False
             valid_hash = None
             
-            # Try each hash in the store
-            for stored_hash in guild_config.main_store:
-                if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
-                    key_found = True
-                    valid_hash = stored_hash
-                    break
+            # First check direct match
+            if key_hash in guild_config.main_store:
+                key_found = True
+                valid_hash = key_hash
+            else:
+                # Try each stored hash
+                for stored_hash in guild_config.main_store:
+                    try:
+                        if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
+                            key_found = True
+                            valid_hash = stored_hash
+                            break
+                    except Exception as e:
+                        logging.error(f"Key verification error: {e}")
+                        continue
 
             if key_found and valid_hash:
                 # Remove key and grant role
