@@ -543,12 +543,12 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
 
 class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
     key = discord.ui.TextInput(
-        label="Arcane Key",
+        label="Enter your mystical key",
         placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
-        style=discord.TextStyle.short,
-        required=True
+        min_length=36,
+        max_length=36
     )
-
+    
     async def on_submit(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -582,7 +582,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
             
             # Verify in parallel
             async with key_locks[guild_id][get_shard(user.id)]:
-                is_valid = await KeySecurity.verify_keys_parallel(
+                is_valid, matching_hash = await KeySecurity.verify_keys_parallel(
                     key_value, 
                     possible_hashes,
                     guild_config
@@ -593,6 +593,10 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                     await audit.log_claim(interaction, key_value[:8], False)
                     await progress_msg.edit(content="❌ Invalid key or already claimed!")
                     return
+
+                # Remove the used key
+                await guild_config.remove_key(matching_hash, guild_id)
+                await save_config()
 
             role = interaction.guild.get_role(guild_config.role_id)
             try:
@@ -675,10 +679,10 @@ class KeySecurity:
         )
 
     @staticmethod
-    async def verify_keys_parallel(key: str, hashes: Set[str], guild_config: GuildConfig = None) -> Optional[str]:
-        """Verify key against multiple hashes in parallel"""
+    async def verify_keys_parallel(key: str, hashes: Set[str], guild_config: GuildConfig = None) -> tuple[bool, Optional[str]]:
+        """Verify key against multiple hashes in parallel and return (is_valid, matching_hash)"""
         if not hashes:
-            return None
+            return False, None
             
         # Create verification tasks
         tasks = [
@@ -687,6 +691,7 @@ class KeySecurity:
         ]
         
         # Wait for first match or all failures
+        matching_hash = None
         for done_task in asyncio.as_completed(tasks):
             try:
                 if await done_task:
@@ -694,11 +699,11 @@ class KeySecurity:
                     for task in tasks:
                         if not task.done():
                             task.cancel()
-                    return True
+                    return True, full_hash
             except asyncio.CancelledError:
                 pass
                 
-        return False
+        return False, None
 
 class AdaptiveWorkerPool:
     def __init__(self, min_workers: int = 4, max_workers: int = 32):
