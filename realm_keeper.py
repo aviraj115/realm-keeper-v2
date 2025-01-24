@@ -428,93 +428,112 @@ async def sync_commands():
     except Exception as e:
         logging.error(f"Critical sync error: {str(e)}")
 
-@bot.event
-async def on_ready():
-    """Initialize bot systems with monitoring"""
-    try:
-        logging.info("🔄 Starting bot systems...")
-        
-        # Load config first
-        await load_config()
-        
-        # Start background tasks
-        cleanup_task.start()
-        save_stats_task.start()
-        memory_check.start()
-        monitor_workers.start()
-        
-        # Pre-warm systems
-        logging.info("⚡ Pre-warming crypto...")
-        fake_key = str(uuid.uuid4())
-        for _ in range(4):
-            await asyncio.get_event_loop().run_in_executor(
-                key_security.worker_pool,
-                KeySecurity.hash_key,
-                fake_key
-            )
-        
-        # Pre-warm connection pool
-        logging.info("🌐 Pre-warming connections...")
-        async with bot.session.get(
-            "https://discord.com/api/v9/gateway",
-            timeout=HTTP_TIMEOUT
-        ) as resp:
-            await resp.read()
-            
-        # Pre-warm caches
-        logging.info("💾 Pre-warming caches...")
-        for guild_id, guild_config in config.items():
-            await key_cache.warm_cache(guild_id, guild_config)
-            
-        # Restore dynamic commands
-        restored = 0
-        for guild_id, guild_config in config.items():
-            try:
-                await create_dynamic_command(guild_config.command, guild_id)
-                restored += 1
-            except Exception as e:
-                logging.error(f"Failed to restore command for guild {guild_id}: {e}")
-        
-        logging.info(f"Restored {restored} custom commands")
-        
-        # Initialize worker pools
-        logging.info("👷 Starting worker pools...")
-        worker_pool.start()
-        
-        # Sync commands
-        await sync_commands()
-        
-        # Update presence
-        await bot.change_presence(
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name="⚡ for magical keys"
-            )
-        )
-        
-        # Log ready state
-        guild_count = len(bot.guilds)
-        key_count = sum(len(cfg.main_store) for cfg in config.values())
-        logging.info(
-            f"✅ Bot ready!\n"
-            f"• Guilds: {guild_count}\n"
-            f"• Total keys: {key_count}\n"
-            f"• Workers: {len(key_security.worker_pool._threads)}\n"
-            f"• Connections: {len(bot.http._HTTPClient__session.connector._conns)}\n"
-            f"• Commands restored: {restored}"
-        )
-        
-    except Exception as e:
-        logging.error(f"Startup error: {str(e)}")
-        # Continue with basic functionality
+class RealmKeeper(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.worker_pool = AdaptiveWorkerPool()
+        self.key_security = KeySecurity()
+        self.monitor_task = None
 
-@bot.event
-async def on_guild_join(guild):
-    try:
-        await bot.tree.sync(guild=guild)
-        logging.info(f"Auto-synced commands to {guild.name}")
-    except Exception as e:
-        logging.error(f"Failed to sync new guild: {str(e)}")
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Initialize bot systems with monitoring"""
+        try:
+            logging.info("🔄 Starting bot systems...")
+            
+            # Load config first
+            await load_config()
+            
+            # Start background tasks
+            cleanup_task.start()
+            save_stats_task.start()
+            memory_check.start()
+            monitor_workers.start()
+            
+            # Pre-warm systems
+            logging.info("⚡ Pre-warming crypto...")
+            fake_key = str(uuid.uuid4())
+            for _ in range(4):
+                await asyncio.get_event_loop().run_in_executor(
+                    self.key_security.worker_pool,
+                    KeySecurity.hash_key,
+                    fake_key
+                )
+            
+            # Pre-warm connection pool
+            logging.info("🌐 Pre-warming connections...")
+            async with self.bot.session.get(
+                "https://discord.com/api/v9/gateway",
+                timeout=HTTP_TIMEOUT
+            ) as resp:
+                await resp.read()
+            
+            # Pre-warm caches
+            logging.info("�� Pre-warming caches...")
+            for guild_id, guild_config in config.items():
+                await key_cache.warm_cache(guild_id, guild_config)
+            
+            # Restore dynamic commands
+            restored = 0
+            for guild_id, guild_config in config.items():
+                try:
+                    await create_dynamic_command(guild_config.command, guild_id)
+                    restored += 1
+                except Exception as e:
+                    logging.error(f"Failed to restore command for guild {guild_id}: {e}")
+            
+            logging.info(f"Restored {restored} custom commands")
+            
+            # Initialize worker pools
+            logging.info("👷 Starting worker pools...")
+            self.worker_pool.start()
+            
+            # Sync commands
+            await sync_commands()
+            
+            # Update presence
+            await self.bot.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.watching,
+                    name="⚡ for magical keys"
+                )
+            )
+            
+            # Log ready state
+            guild_count = len(self.bot.guilds)
+            key_count = sum(len(cfg.main_store) for cfg in config.values())
+            logging.info(
+                f"✅ Bot ready!\n"
+                f"• Guilds: {guild_count}\n"
+                f"• Total keys: {key_count}\n"
+                f"• Workers: {len(self.key_security.worker_pool._threads)}\n"
+                f"• Connections: {len(self.bot.http._HTTPClient__session.connector._conns)}\n"
+                f"• Commands restored: {restored}"
+            )
+            
+        except Exception as e:
+            logging.error(f"Startup error: {str(e)}")
+            # Continue with basic functionality
+
+    @commands.Cog.listener()
+    async def on_error(self, event, *args, **kwargs):
+        """Handle connection errors gracefully"""
+        error = sys.exc_info()[1]
+        if isinstance(error, (HTTPException, GatewayNotFound)):
+            logging.error(f"Discord API error in {event}: {str(error)}")
+            await backoff.expo(
+                self.bot.connect,
+                max_tries=MAX_RETRIES,
+                max_time=60
+            )
+        else:
+            logging.error(f"Error in {event}: {str(error)}")
+
+    @commands.Cog.listener()
+    async def on_connect(self):
+        """Log successful connections"""
+        logging.info(f"Connected to Discord API with {self.bot.shard_count} shards")
+        logging.info(f"Active connections: {len(self.bot.http._HTTPClient__session.connector._conns)}")
 
 @tasks.loop(hours=24)
 async def cleanup_task():
@@ -764,7 +783,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
 
             # Verify in parallel batches
             async with key_locks[guild_id][get_shard(user.id)]:
-                is_valid, updated_hash = await key_security.verify_keys_batch(
+                is_valid, updated_hash = await self.key_security.verify_keys_batch(
                     key_value, 
                     possible_hashes,
                     chunk_size=20  # Larger chunks for better throughput
@@ -778,7 +797,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
 
                 # Update key storage
                 for full_hash in possible_hashes:
-                    if await key_security.verify_key(key_value, full_hash)[0]:
+                    if await self.key_security.verify_key(key_value, full_hash)[0]:
                         await guild_config.remove_key(full_hash, guild_id)
                         if updated_hash:  # Key still has uses
                             await guild_config.add_key(updated_hash, guild_id)
@@ -1558,28 +1577,6 @@ queue_metrics = QueueMetrics()
 
 # Initialize key security (near the top with other initializations)
 key_security = KeySecurity()
-
-# Add connection error handling
-@bot.event
-async def on_error(event, *args, **kwargs):
-    """Handle connection errors gracefully"""
-    error = sys.exc_info()[1]
-    if isinstance(error, (HTTPException, GatewayNotFound)):
-        logging.error(f"Discord API error in {event}: {str(error)}")
-        # Implement exponential backoff for retries
-        await backoff.expo(
-            bot.connect,
-            max_tries=MAX_RETRIES,
-            max_time=60
-        )
-    else:
-        logging.error(f"Error in {event}: {str(error)}")
-
-@bot.event
-async def on_connect():
-    """Log successful connections"""
-    logging.info(f"Connected to Discord API with {bot.shard_count} shards")
-    logging.info(f"Active connections: {len(bot.http._HTTPClient__session.connector._conns)}")
 
 @tasks.loop(seconds=30)
 async def monitor_performance():
