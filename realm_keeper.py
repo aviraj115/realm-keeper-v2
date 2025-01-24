@@ -62,6 +62,29 @@ HTTP_TIMEOUT = ClientTimeout(total=30, connect=10)
 MAX_RETRIES = 3
 MAX_CONNECTIONS = 100
 
+# Move this near the top, before any classes that use it
+def admin_cooldown():
+    """Decorator for admin command cooldowns"""
+    async def predicate(interaction: discord.Interaction):
+        if interaction.user.guild_permissions.administrator:
+            return True
+        
+        # Get cooldown bucket
+        bucket = commands._buckets.get_bucket(interaction.command)
+        if bucket is None:
+            bucket = commands.Cooldown(1, 300, commands.BucketType.user)
+            commands._buckets[interaction.command] = bucket
+            
+        # Check cooldown
+        retry_after = bucket.update_rate_limit()
+        if retry_after:
+            raise commands.CommandOnCooldown(
+                bucket, retry_after, commands.BucketType.user
+            )
+        return True
+        
+    return app_commands.check(predicate)
+
 class AdaptiveWorkerPool:
     """Thread pool that scales based on load"""
     def __init__(self, min_workers=4, max_workers=16):
@@ -1498,29 +1521,6 @@ async def before_task():
 
 # Start time for uptime tracking
 start_time = time.time()
-
-# Add near the top with other decorators
-def admin_cooldown():
-    """Decorator for admin command cooldowns"""
-    async def predicate(interaction: discord.Interaction):
-        if interaction.user.guild_permissions.administrator:
-            return True
-        
-        # Get cooldown bucket
-        bucket = commands._buckets.get_bucket(interaction.command)
-        if bucket is None:
-            bucket = commands.Cooldown(1, 300, commands.BucketType.user)
-            commands._buckets[interaction.command] = bucket
-            
-        # Check cooldown
-        retry_after = bucket.update_rate_limit()
-        if retry_after:
-            raise commands.CommandOnCooldown(
-                bucket, retry_after, commands.BucketType.user
-            )
-        return True
-        
-    return app_commands.check(predicate)
 
 if __name__ == "__main__":
     TOKEN = os.getenv('DISCORD_TOKEN')
