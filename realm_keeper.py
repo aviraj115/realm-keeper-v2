@@ -371,7 +371,12 @@ class GuildConfig:
     
     def _rebuild_bloom(self):
         """Rebuild Bloom filter from main store"""
-        self.bloom.clear()
+        # Create new filter instead of clearing
+        self.bloom = ScalableBloomFilter(
+            initial_capacity=max(1000, len(self.main_store) * 2),
+            error_rate=0.001,
+            mode=ScalableBloomFilter.SMALL_SET_GROWTH
+        )
         for full_hash in self.main_store:
             hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
             self.bloom.add(hash_part)
@@ -1232,7 +1237,7 @@ class KeySecurity:
             
             # Add salt and hash
             salted_key = f"{key}{self.salt.hex()}"
-            hash_str = bcrypt_sha256.using(rounds=self.HASH_ROUNDS).hash(salted_key)
+            hash_str = bcrypt_sha256.hash(salted_key, rounds=self.HASH_ROUNDS)
             
             # Add metadata if needed
             if meta:
@@ -1242,6 +1247,35 @@ class KeySecurity:
         except Exception as e:
             logging.error(f"Hash error: {str(e)}")
             raise
+    
+    def verify_key(self, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
+        """Verify a key against a hash, returns (is_valid, updated_hash)"""
+        try:
+            # Split hash and metadata
+            hash_str = full_hash.split(self.DELIMITER)[0]
+            
+            # Check expiration if present
+            if self.DELIMITER in full_hash:
+                try:
+                    meta = json.loads(full_hash.split(self.DELIMITER)[1])
+                    if meta.get('exp', float('inf')) < time.time():
+                        return False, None
+                except json.JSONDecodeError:
+                    return False, None
+            
+            # Verify hash
+            salted_key = f"{key}{self.salt.hex()}"
+            try:
+                if bcrypt_sha256.verify(salted_key, hash_str):
+                    return True, full_hash
+            except ValueError:
+                pass
+            
+            return False, None
+            
+        except Exception as e:
+            logging.error(f"Verification error: {str(e)}")
+            return False, None
 
 class KeyCleanup:
     def __init__(self, bot):
@@ -1748,41 +1782,18 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             )
 
 class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
-    def __init__(self):
-        super().__init__()
-        self.add_item(discord.ui.TextInput(
-            label="Keys (one per line)",
-            style=discord.TextStyle.paragraph,
-            placeholder="Enter keys, one per line...",
-            min_length=36,
-            required=True
-        ))
+    keys = discord.ui.TextInput(
+        label="Enter keys (one per line)",
+        style=discord.TextStyle.long,
+        placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+        required=True,
+        max_length=2000
+    )
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Get keys from input
-            keys = self.children[0].value.strip().split('\n')
-            
-            # Validate and add keys
+            # Get guild config
             guild_id = interaction.guild.id
-            valid_keys = []
-            
-            for key in keys:
-                if len(key) == 36:  # UUID length
-                    try:
-                        uuid_obj = uuid.UUID(key, version=4)
-                        valid_keys.append(key)
-                    except ValueError:
-                        continue
-            
-            if not valid_keys:
-                await interaction.response.send_message(
-                    "❌ No valid keys found!", 
-                    ephemeral=True
-                )
-                return
-
-            # Add to config
             guild_config = interaction.client.config.guilds.get(guild_id)
             if not guild_config:
                 await interaction.response.send_message(
@@ -1791,16 +1802,74 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 )
                 return
 
-            guild_config.bulk_add_keys(valid_keys, guild_id)
+            # Parse and validate keys
+            key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
+            if not key_list:
+                await interaction.response.send_message(
+                    "❌ No valid keys found!", 
+                    ephemeral=True
+                )
+                return
+
+            # Validate format and uniqueness
+            valid_keys = []
+            invalid_format = []
+            duplicates = []
+
+            for key in key_list:
+                try:
+                    # Check UUID format
+                    uuid_obj = uuid.UUID(key, version=4)
+                    if str(uuid_obj) != key.lower():
+                        invalid_format.append(key)
+                        continue
+                    
+                    # Check if key already exists
+                    if any(KeySecurity.verify_key(key, h)[0] for h in guild_config.main_store):
+                        duplicates.append(key)
+                        continue
+                    
+                    valid_keys.append(key)
+                except ValueError:
+                    invalid_format.append(key)
+
+            if not valid_keys:
+                msg = ["❌ No valid keys to add!"]
+                if invalid_format:
+                    msg.append(f"• Invalid format: {len(invalid_format)}")
+                if duplicates:
+                    msg.append(f"• Duplicates: {len(duplicates)}")
+                await interaction.response.send_message(
+                    "\n".join(msg),
+                    ephemeral=True
+                )
+                return
+
+            # Add valid keys
+            hashed_keys = set()
+            for key in valid_keys:
+                hashed = KeySecurity.hash_key(key)
+                hashed_keys.add(hashed)
+            
+            await guild_config.bulk_add_keys(hashed_keys, guild_id)
             await interaction.client.config.save()
+            stats.log_keys_added(guild_id, len(valid_keys))
+            await audit.log_key_add(interaction, len(valid_keys))
+            
+            # Build response message
+            msg = [f"✅ Added {len(valid_keys)} keys!"]
+            if invalid_format:
+                msg.append(f"• Invalid format: {len(invalid_format)}")
+            if duplicates:
+                msg.append(f"• Duplicates: {len(duplicates)}")
             
             await interaction.response.send_message(
-                f"✅ Added {len(valid_keys)} keys!", 
+                "\n".join(msg),
                 ephemeral=True
             )
             
         except Exception as e:
-            logging.error(f"Bulk key add error: {e}")
+            logging.error(f"Bulk key add error: {str(e)}")
             await interaction.response.send_message(
                 "❌ Failed to add keys!", 
                 ephemeral=True
