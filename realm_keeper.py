@@ -552,7 +552,11 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
-            progress_msg = await interaction.followup.send("🔮 Channeling mystical energies...", ephemeral=True, wait=True)
+            progress_msg = await interaction.followup.send(
+                "🔮 Channeling mystical energies...", 
+                ephemeral=True, 
+                wait=True
+            )
             
             guild_id = interaction.guild.id
             user = interaction.user
@@ -565,24 +569,30 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
 
             retry_after = claim_cooldown.get_retry_after(interaction)
             if retry_after:
-                await progress_msg.edit(content=f"⏳ Cooldown active. Try again in {int(retry_after)} seconds.")
+                await progress_msg.edit(
+                    content=f"⏳ Cooldown active. Try again in {int(retry_after)} seconds."
+                )
                 return
 
             start_time = time.time()
-            is_valid = False
             
+            # Get possible matches using quick lookup
+            quick_hash = hashlib.sha256(key_value.encode()).hexdigest()[:8]
+            possible_hashes = guild_config.quick_lookup.get(quick_hash, set())
+            
+            # Verify in parallel
             async with key_locks[guild_id][get_shard(user.id)]:
-                for full_hash in guild_config.main_store:
-                    if await KeySecurity.verify_key_async(key_value, full_hash, guild_config):
-                        await guild_config.remove_key(full_hash, guild_id)
-                        is_valid = True
-                        break
+                is_valid = await KeySecurity.verify_keys_parallel(
+                    key_value, 
+                    possible_hashes,
+                    guild_config
+                )
 
-            if not is_valid:
-                stats.log_claim(guild_id, False)
-                await audit.log_claim(interaction, key_value, False)
-                await progress_msg.edit(content="❌ Invalid key or already claimed!")
-                return
+                if not is_valid:
+                    stats.log_claim(guild_id, False)
+                    await audit.log_claim(interaction, key_value[:8], False)
+                    await progress_msg.edit(content="❌ Invalid key or already claimed!")
+                    return
 
             role = interaction.guild.get_role(guild_config.role_id)
             try:
@@ -663,6 +673,32 @@ class KeySecurity:
             full_hash,
             guild_config
         )
+
+    @staticmethod
+    async def verify_keys_parallel(key: str, hashes: Set[str], guild_config: GuildConfig = None) -> Optional[str]:
+        """Verify key against multiple hashes in parallel"""
+        if not hashes:
+            return None
+            
+        # Create verification tasks
+        tasks = [
+            asyncio.create_task(KeySecurity.verify_key_async(key, full_hash, guild_config))
+            for full_hash in hashes
+        ]
+        
+        # Wait for first match or all failures
+        for done_task in asyncio.as_completed(tasks):
+            try:
+                if await done_task:
+                    # Cancel remaining tasks
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    return True
+            except asyncio.CancelledError:
+                pass
+                
+        return False
 
 class AdaptiveWorkerPool:
     def __init__(self, min_workers: int = 4, max_workers: int = 32):
