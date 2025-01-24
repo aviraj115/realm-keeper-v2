@@ -1914,29 +1914,54 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 )
                 return
 
-            # Make a copy of the keys to avoid modification during iteration
-            stored_keys = list(guild_config.main_store)
-            
-            # Try to find a matching key
+            # Generate hash and try direct match first (fastest)
+            key_hash = KeySecurity.hash_key(key_value)
+            if key_hash in guild_config.main_store:
+                # Remove key and grant role
+                await guild_config.remove_key(key_hash, guild_id)
+                await interaction.client.config.save()
+                
+                try:
+                    await interaction.user.add_roles(role)
+                    stats.log_claim(guild_id, True)
+                    await audit.log_claim(interaction, True)
+                    
+                    success_msg = random.choice(guild_config.success_msgs)
+                    await interaction.followup.send(
+                        success_msg.format(
+                            user=interaction.user.mention,
+                            role=role.mention
+                        ),
+                        ephemeral=True
+                    )
+                except discord.Forbidden:
+                    await interaction.followup.send(
+                        "🔒 The mystical barriers prevent me from bestowing this power!", 
+                        ephemeral=True
+                    )
+                except Exception as e:
+                    logging.error(f"Role grant error: {str(e)}")
+                    await interaction.followup.send(
+                        "💔 The ritual of bestowal has failed!", 
+                        ephemeral=True
+                    )
+                return
+
+            # If no direct match, verify against a small subset of keys
             key_found = False
             valid_hash = None
             
-            # First try direct hash match (fastest)
-            key_hash = KeySecurity.hash_key(key_value)
-            if key_hash in stored_keys:
-                key_found = True
-                valid_hash = key_hash
-            else:
-                # Try each stored hash
-                for stored_hash in stored_keys:
-                    try:
-                        if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
-                            key_found = True
-                            valid_hash = stored_hash
-                            break
-                    except Exception as e:
-                        logging.error(f"Key verification error: {e}")
-                        continue
+            # Only check the first 100 keys to avoid long verification times
+            stored_keys = list(guild_config.main_store)[:100]
+            for stored_hash in stored_keys:
+                try:
+                    if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
+                        key_found = True
+                        valid_hash = stored_hash
+                        break
+                except Exception as e:
+                    logging.error(f"Key verification error: {e}")
+                    continue
 
             if key_found and valid_hash:
                 # Remove key and grant role
