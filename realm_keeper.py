@@ -555,7 +555,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
             await interaction.response.defer(ephemeral=True)
             progress_msg = await interaction.followup.send(
                 "🔮 Channeling mystical energies...", 
-                ephemeral=True, 
+                ephemeral=True,
                 wait=True
             )
             
@@ -568,116 +568,102 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 await progress_msg.edit(content="❌ Server not configured!")
                 return
 
-            retry_after = claim_cooldown.get_retry_after(interaction)
-            if retry_after:
-                await progress_msg.edit(
-                    content=f"⏳ Cooldown active. Try again in {int(retry_after)} seconds."
-                )
+            # Validate UUID format
+            try:
+                uuid_obj = uuid.UUID(key_value, version=4)
+                if str(uuid_obj) != key_value.lower():
+                    raise ValueError()
+            except ValueError:
+                await progress_msg.edit(content="❌ Invalid key format!")
                 return
 
-            start_time = time.time()
-            
-            # Get possible matches using quick lookup
-            quick_hash = hashlib.sha256(key_value.encode()).hexdigest()[:8]
-            possible_hashes = guild_config.quick_lookup.get(quick_hash, set())
-            
-            # Verify in parallel
+            # Verify and process key
             async with key_locks[guild_id][get_shard(user.id)]:
-                is_valid, updated_hash = await KeySecurity.verify_keys_parallel(key_value, possible_hashes)
-
-                if not is_valid:
-                    stats.log_claim(guild_id, False)
-                    await audit.log_claim(interaction, key_value[:8], False)
-                    await progress_msg.edit(content="❌ Invalid key or already claimed!")
-                    return
-
-                # Find the matching hash
-                for full_hash in possible_hashes:
-                    if await KeySecurity.verify_key_async(key_value, full_hash) == (True, updated_hash):
-                        # Remove the old hash
+                # Find matching key
+                for full_hash in list(guild_config.main_store):
+                    is_valid, updated_hash = KeySecurity.verify_key(key_value, full_hash)
+                    if is_valid:
+                        # Remove old hash
                         await guild_config.remove_key(full_hash, guild_id)
                         # Add updated hash if key still has uses
                         if updated_hash:
                             await guild_config.add_key(updated_hash, guild_id)
-                        break
+                        await save_config()
+                        
+                        # Grant role and send success message
+                        role = interaction.guild.get_role(guild_config.role_id)
+                        await user.add_roles(role)
+                        success_msg = random.choice(guild_config.success_msgs)
+                        await progress_msg.edit(
+                            content=success_msg.format(
+                                user=user.mention,
+                                role=role.name
+                            )
+                        )
+                        return
 
-                await save_config()
-
-            role = interaction.guild.get_role(guild_config.role_id)
-            try:
-                await user.add_roles(role)
-            except discord.Forbidden:
-                await progress_msg.edit(content="❌ Bot lacks permissions to assign role!")
-                return
-
-            msg_template = random.choice(guild_config.success_msgs or DEFAULT_SUCCESS_MESSAGES)
-            await progress_msg.edit(content=msg_template.format(user=user.mention, role=role.name))
-
-            claim_time = time.time() - start_time
-            stats.log_claim(guild_id, True, claim_time)
-            await audit.log_claim(interaction, key_value, True)
-
+                # Key not found or invalid
+                await progress_msg.edit(content="❌ Invalid key or already claimed!")
+                
         except Exception as e:
             logging.error(f"Claim error: {str(e)}")
-            await progress_msg.edit(content="❌ A mystical disturbance prevents this action!")
+            await progress_msg.edit(content="❌ An error occurred!")
 
 class KeySecurity:
-    DELIMITER = "◆"
+    DELIMITER = "||"
     
     @staticmethod
-    def hash_key(key: str, expiry: int = None, max_uses: int = None) -> str:
-        try:
-            uuid_obj = uuid.UUID(key, version=4)
-            if str(uuid_obj) != key.lower():
-                raise ValueError("Not a valid UUIDv4")
-        except ValueError as e:
-            raise ValueError(f"Invalid UUID format: {str(e)}")
-            
-        metadata = {}
-        if expiry:
-            metadata['exp'] = int(time.time()) + expiry
-        if max_uses:
-            metadata['uses'] = max_uses
-        
+    def hash_key(key: str, expiry_seconds: Optional[int] = None, max_uses: Optional[int] = None) -> str:
+        """Hash a key with optional metadata"""
         hash_str = bcrypt_sha256.hash(key)
-        return f"{hash_str}{KeySecurity.DELIMITER}{json.dumps(metadata)}" if metadata else hash_str
+        if expiry_seconds or max_uses:
+            metadata = {}
+            if expiry_seconds:
+                metadata['exp'] = time.time() + expiry_seconds
+            if max_uses:
+                metadata['uses'] = max_uses
+            return f"{hash_str}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
+        return hash_str
 
     @staticmethod
     def verify_key(key: str, full_hash: str) -> tuple[bool, Optional[str]]:
         """Verify key and return (is_valid, updated_hash)"""
         try:
-            uuid_obj = uuid.UUID(key, version=4)
-            if str(uuid_obj) != key.lower():
-                return False, None
-                
+            # Basic format validation
             if KeySecurity.DELIMITER in full_hash:
                 hash_part, meta_part = full_hash.split(KeySecurity.DELIMITER, 1)
                 metadata = json.loads(meta_part)
                 
                 # Check expiry
                 if metadata.get('exp') and metadata['exp'] < time.time():
+                    logging.debug(f"Key expired: {key[:8]}...")
                     return False, None
                 
                 # Verify hash
                 if not bcrypt_sha256.verify(key, hash_part):
+                    logging.debug(f"Hash mismatch: {key[:8]}...")
                     return False, None
                 
                 # Handle uses
                 if 'uses' in metadata:
                     if metadata['uses'] <= 0:
+                        logging.debug(f"No uses left: {key[:8]}...")
                         return False, None
                     metadata['uses'] -= 1
                     if metadata['uses'] > 0:
                         # Key still has uses left
-                        return True, f"{hash_part}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
+                        new_hash = f"{hash_part}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
+                        return True, new_hash
                     # Key used up
                     return True, None
                     
                 return True, full_hash
             else:
+                # Simple hash without metadata
                 return bcrypt_sha256.verify(key, full_hash), full_hash
                 
-        except (ValueError, Exception):
+        except Exception as e:
+            logging.error(f"Key verification error: {str(e)}")
             return False, None
 
     @staticmethod
