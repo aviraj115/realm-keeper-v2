@@ -138,7 +138,6 @@ worker_pool = AdaptiveWorkerPool()
 # Initialize bot with optimized connection handling
 class RealmBot(commands.AutoShardedBot):
     def __init__(self):
-        # Initialize bot with settings
         super().__init__(
             command_prefix="!",
             intents=intents,
@@ -149,7 +148,7 @@ class RealmBot(commands.AutoShardedBot):
         )
         
         # Initialize components
-        self.session = None  # Will be set in setup_hook
+        self.session = None
         self.connector = None
         self.realm_keeper = None
         self.config = Config()
@@ -169,14 +168,17 @@ class RealmBot(commands.AutoShardedBot):
             )
             self.session = aiohttp.ClientSession(connector=self.connector)
             
+            # Add cogs first
+            self.realm_keeper = RealmKeeper(self)
+            await self.add_cog(self.realm_keeper)
+            
+            # Then sync commands
+            await self.tree.sync()
+            logging.info("Synced commands globally")
+            
             # Initialize systems
             await self.config.load()
             await self.key_cleanup.start()
-            await self.command_sync.sync_all()
-            
-            # Add realm keeper cog
-            self.realm_keeper = RealmKeeper(self)
-            await self.add_cog(self.realm_keeper)
             
         except Exception as e:
             logging.error(f"Setup error: {str(e)}")
@@ -826,9 +828,9 @@ class RealmKeeper(commands.Cog):
         """Bulk add keys"""
         await interaction.response.send_modal(BulkKeyModal())
 
-    @app_commands.command(name="setup", description="⚙️ Initial setup")
+    @app_commands.command(name="setup", description="⚙️ Initial server setup")
+    @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    @admin_cooldown()
     async def setup(self, interaction: discord.Interaction):
         """Initial server setup"""
         await interaction.response.send_modal(SetupModal())
