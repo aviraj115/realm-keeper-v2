@@ -772,7 +772,8 @@ class Stats:
             'total_claim_time': 0.0,
             'fastest_claim': float('inf'),
             'slowest_claim': 0.0,
-            'last_claim': 0
+            'last_claim': 0,
+            'session_start': time.time()  # Add this to track stats per session
         })
         self.load_stats()
     
@@ -781,7 +782,10 @@ class Stats:
         try:
             async with aiofiles.open('stats.json', 'w') as f:
                 await f.write(json.dumps({
-                    str(guild_id): stats 
+                    str(guild_id): {
+                        k: v for k, v in stats.items()
+                        if k not in ['session_start']  # Don't persist session-specific data
+                    }
                     for guild_id, stats in self.guild_stats.items()
                 }, indent=4))
         except Exception as e:
@@ -793,11 +797,36 @@ class Stats:
             with open('stats.json', 'r') as f:
                 data = json.loads(f.read())
                 for guild_id, stats in data.items():
+                    # Reset counters that should be per-session
+                    stats['keys_added'] = 0
+                    stats['keys_removed'] = 0
+                    stats['total_claims'] = 0
+                    stats['successful_claims'] = 0
+                    stats['failed_claims'] = 0
+                    stats['total_claim_time'] = 0.0
+                    stats['fastest_claim'] = float('inf')
+                    stats['slowest_claim'] = 0.0
+                    stats['session_start'] = time.time()
                     self.guild_stats[int(guild_id)].update(stats)
         except FileNotFoundError:
-            pass  # No stats file yet
+            pass
         except Exception as e:
             logging.error(f"Failed to load stats: {str(e)}")
+
+    def reset_guild_stats(self, guild_id: int):
+        """Reset stats for a guild"""
+        self.guild_stats[guild_id] = {
+            'total_claims': 0,
+            'successful_claims': 0,
+            'failed_claims': 0,
+            'keys_added': 0,
+            'keys_removed': 0,
+            'total_claim_time': 0.0,
+            'fastest_claim': float('inf'),
+            'slowest_claim': 0.0,
+            'last_claim': 0,
+            'session_start': time.time()
+        }
 
     def log_claim(self, guild_id: int, success: bool, time_taken: float = None):
         """Log a claim attempt with timing"""
@@ -998,6 +1027,9 @@ async def clearkeys(interaction: discord.Interaction):
     guild_config.quick_lookup.clear()
     await key_cache.invalidate(guild_id)
     await save_config()
+    
+    # Reset stats when clearing keys
+    stats.reset_guild_stats(guild_id)
     
     await interaction.response.send_message(
         f"✅ Cleared {key_count} keys!",
