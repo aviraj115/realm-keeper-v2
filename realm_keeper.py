@@ -388,9 +388,24 @@ async def main():
         async with bot:
             await bot.start(TOKEN)
             
+    except KeyboardInterrupt:
+        logging.info("Shutdown requested... closing gracefully")
+        if bot:
+            await bot.close()
+            
     except Exception as e:
         logging.error(f"Startup error: {str(e)}")
+        if bot:
+            await bot.close()
         raise
+        
+    finally:
+        # Cleanup
+        if worker_pool:
+            worker_pool.shutdown()
+        # Save final stats
+        await stats.save_stats()
+        logging.info("Shutdown complete")
 
 # Configuration handling
 class GuildConfig:
