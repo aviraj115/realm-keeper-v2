@@ -768,54 +768,62 @@ class Stats:
             'successful_claims': 0,
             'failed_claims': 0,
             'keys_added': 0,
-            'claim_count': 0,
-            'total_claim_time': 0,
+            'keys_removed': 0,
+            'total_claim_time': 0.0,
             'fastest_claim': float('inf'),
-            'slowest_claim': 0
+            'slowest_claim': 0.0,
+            'last_claim': 0
         })
-        self.load_stats()  # Load existing stats on init
-    
-    async def save_stats(self):
-        """Save stats to file"""
-        try:
-            async with aiofiles.open('stats.json', 'w') as f:
-                await f.write(json.dumps({
-                    str(guild_id): stats 
-                    for guild_id, stats in self.guild_stats.items()
-                }, indent=4))
-        except Exception as e:
-            logging.error(f"Failed to save stats: {str(e)}")
-    
-    def load_stats(self):
-        """Load stats from file"""
-        try:
-            with open('stats.json', 'r') as f:
-                data = json.loads(f.read())
-                for guild_id, stats in data.items():
-                    self.guild_stats[int(guild_id)].update(stats)
-        except FileNotFoundError:
-            pass  # No stats file yet
-        except Exception as e:
-            logging.error(f"Failed to load stats: {str(e)}")
-    
+        self.load_stats()
+
     def log_claim(self, guild_id: int, success: bool, time_taken: float = None):
+        """Log a claim attempt with timing"""
         stats = self.guild_stats[guild_id]
         stats['total_claims'] += 1
+        stats['last_claim'] = time.time()
+        
         if success:
             stats['successful_claims'] += 1
+            if time_taken is not None:
+                stats['total_claim_time'] += time_taken
+                if time_taken < stats['fastest_claim']:
+                    stats['fastest_claim'] = time_taken
+                if time_taken > stats['slowest_claim']:
+                    stats['slowest_claim'] = time_taken
         else:
             stats['failed_claims'] += 1
-        if time_taken is not None:
-            stats['claim_count'] += 1
-            stats['total_claim_time'] += time_taken
-            stats['fastest_claim'] = min(stats['fastest_claim'], time_taken)
-            stats['slowest_claim'] = max(stats['slowest_claim'], time_taken)
-    
+
     def log_keys_added(self, guild_id: int, count: int):
+        """Log keys being added"""
         self.guild_stats[guild_id]['keys_added'] += count
-    
+
+    def log_keys_removed(self, guild_id: int, count: int):
+        """Log keys being removed"""
+        self.guild_stats[guild_id]['keys_removed'] += count
+
     def get_stats(self, guild_id: int) -> dict:
-        return self.guild_stats[guild_id].copy()
+        """Get formatted stats for display"""
+        stats = self.guild_stats[guild_id]
+        
+        # Calculate average claim time
+        successful_claims = stats['successful_claims']
+        avg_time = stats['total_claim_time'] / successful_claims if successful_claims > 0 else 0
+        
+        # Format timing stats
+        timing_stats = {
+            'average': f"{avg_time:.2f}s",
+            'fastest': f"{stats['fastest_claim']:.2f}s" if stats['fastest_claim'] != float('inf') else "N/A",
+            'slowest': f"{stats['slowest_claim']:.2f}s" if stats['slowest_claim'] > 0 else "N/A"
+        }
+        
+        return {
+            'total_claims': stats['total_claims'],
+            'successful_claims': stats['successful_claims'],
+            'failed_claims': stats['failed_claims'],
+            'keys_added': stats['keys_added'],
+            'keys_removed': stats['keys_removed'],
+            'timing': timing_stats
+        }
 
 # Initialize stats
 stats = Stats()
@@ -911,30 +919,45 @@ async def keys(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
         return
         
+    # Get current key stats
     total_keys = len(guild_config.main_store)
     expired = sum(1 for h in guild_config.main_store 
                  if KeySecurity.DELIMITER in h and 
                  json.loads(h.split(KeySecurity.DELIMITER)[1]).get('exp', 0) < time.time())
     
-    guild_stats = stats.get_stats(guild_id)
+    # Get usage stats
+    stats_data = stats.get_stats(guild_id)
+    
     embed = discord.Embed(
         title="🔑 Key Statistics",
         color=discord.Color.blue()
     )
-    embed.add_field(
-        name="Keys",
-        value=f"• Total: {total_keys}\n• Expired: {expired}\n• Added: {guild_stats['keys_added']}"
+    
+    # Key stats
+    keys_info = (
+        f"• Total: {total_keys}\n"
+        f"• Expired: {expired}\n"
+        f"• Added: {stats_data['keys_added']}\n"
+        f"• Removed: {stats_data['keys_removed']}"
     )
-    embed.add_field(
-        name="Claims",
-        value=f"• Total: {guild_stats['total_claims']}\n• Successful: {guild_stats['successful_claims']}\n• Failed: {guild_stats['failed_claims']}"
+    embed.add_field(name="Keys", value=keys_info, inline=False)
+    
+    # Claim stats
+    claims_info = (
+        f"• Total: {stats_data['total_claims']}\n"
+        f"• Successful: {stats_data['successful_claims']}\n"
+        f"• Failed: {stats_data['failed_claims']}"
     )
-    if guild_stats['claim_count'] > 0:
-        avg_time = guild_stats['total_claim_time'] / guild_stats['claim_count']
-        embed.add_field(
-            name="Timing",
-            value=f"• Average: {avg_time:.2f}s\n• Fastest: {guild_stats['fastest_claim']:.2f}s\n• Slowest: {guild_stats['slowest_claim']:.2f}s"
+    embed.add_field(name="Claims", value=claims_info, inline=False)
+    
+    # Timing stats
+    if stats_data['successful_claims'] > 0:
+        timing_info = (
+            f"• Average: {stats_data['timing']['average']}\n"
+            f"• Fastest: {stats_data['timing']['fastest']}\n"
+            f"• Slowest: {stats_data['timing']['slowest']}"
         )
+        embed.add_field(name="Timing", value=timing_info, inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
