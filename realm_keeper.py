@@ -1476,69 +1476,124 @@ start_time = time.time()
 class SetupModal(discord.ui.Modal, title="Realm Setup"):
     def __init__(self):
         super().__init__()
-        self.role = discord.ui.TextInput(
-            label="Role ID to grant (right-click role -> Copy ID)",
-            placeholder="Enter role ID...",
+        # Add TextInputs as items
+        self.add_item(discord.ui.TextInput(
+            label="Role ID to grant",
+            placeholder="Right-click role -> Copy ID",
             min_length=17,
-            max_length=20
-        )
-        self.command = discord.ui.TextInput(
-            label="Command name (without /)",
+            max_length=20,
+            required=True
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="Command name",
             placeholder="claim",
             default="claim",
             min_length=1,
-            max_length=32
-        )
+            max_length=32,
+            required=True
+        ))
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Validate role ID
-            try:
-                role_id = int(self.role.value)
-            except ValueError:
+            # Get values from inputs
+            role_id = int(self.children[0].value)
+            command_name = self.children[1].value.lower()
+            
+            # Validate role
+            if not (role := interaction.guild.get_role(role_id)):
                 await interaction.response.send_message(
-                    "❌ Role ID must be a number!", 
+                    "❌ Invalid role ID!", 
                     ephemeral=True
                 )
                 return
             
-            # Validate role permissions
-            is_valid, message = await interaction.client.realm_keeper.validate_role_permissions(
-                interaction, 
-                role_id
-            )
-            
-            if not is_valid:
-                await interaction.response.send_message(
-                    message,
-                    ephemeral=True
-                )
-                return
-            
-            # Create guild config
+            # Create config
             guild_id = interaction.guild.id
             interaction.client.config.guilds[guild_id] = GuildConfig(
                 role_id=role_id,
-                valid_keys=set(),
-                command=self.command.value.lower()
+                command=command_name
             )
             
-            # Save config and create command
+            # Save and sync
             await interaction.client.config.save()
-            await create_dynamic_command(self.command.value.lower(), guild_id)
+            await create_dynamic_command(command_name, guild_id)
             
             await interaction.response.send_message(
                 f"✅ Setup complete!\n"
-                f"• Role: {message}\n"
-                f"• Command: /{self.command.value}\n"
+                f"• Role: {role.mention}\n"
+                f"• Command: /{command_name}\n"
                 f"• Add keys with /addkey or /addkeys",
                 ephemeral=True
             )
             
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Role ID must be a number!", 
+                ephemeral=True
+            )
         except Exception as e:
             logging.error(f"Setup error: {e}")
             await interaction.response.send_message(
-                "❌ An error occurred during setup!",
+                "❌ Setup failed!", 
+                ephemeral=True
+            )
+
+class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
+    def __init__(self):
+        super().__init__()
+        self.add_item(discord.ui.TextInput(
+            label="Keys (one per line)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Enter keys, one per line...",
+            min_length=36,
+            required=True
+        ))
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Get keys from input
+            keys = self.children[0].value.strip().split('\n')
+            
+            # Validate and add keys
+            guild_id = interaction.guild.id
+            valid_keys = []
+            
+            for key in keys:
+                if len(key) == 36:  # UUID length
+                    try:
+                        uuid.UUID(key, version=4)
+                        valid_keys.append(key)
+                    except ValueError:
+                        continue
+            
+            if not valid_keys:
+                await interaction.response.send_message(
+                    "❌ No valid keys found!", 
+                    ephemeral=True
+                )
+                return
+            
+            # Add to config
+            guild_config = interaction.client.config.guilds.get(guild_id)
+            if not guild_config:
+                await interaction.response.send_message(
+                    "❌ Server not setup! Use /setup first", 
+                    ephemeral=True
+                )
+                return
+            
+            guild_config.add_keys(valid_keys)
+            await interaction.client.config.save()
+            
+            await interaction.response.send_message(
+                f"✅ Added {len(valid_keys)} keys!", 
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logging.error(f"Bulk key add error: {e}")
+            await interaction.response.send_message(
+                "❌ Failed to add keys!", 
                 ephemeral=True
             )
 
