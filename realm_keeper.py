@@ -1359,7 +1359,7 @@ async def before_cleanup():
 class KeySecurity:
     DELIMITER = "||"
     HASH_PREFIX_LENGTH = 7
-    HASH_ROUNDS = 5  # Reduced from 10 for better performance
+    HASH_ROUNDS = 4  # Reduced further for better performance
     _salt = None
     _metrics = defaultdict(lambda: {
         'hashes': 0,
@@ -1371,8 +1371,11 @@ class KeySecurity:
     # Cache for recently verified keys
     _verify_cache = {}
     _cache_lock = asyncio.Lock()
-    _max_cache_size = 1000
-    _cache_ttl = 300  # 5 minutes
+    _max_cache_size = 2000  # Increased cache size
+    _cache_ttl = 600  # 10 minutes
+    
+    # Batch verification settings
+    BATCH_SIZE = 10  # Number of parallel verifications
     
     @classmethod
     def _get_salt(cls) -> bytes:
@@ -1407,59 +1410,21 @@ class KeySecurity:
             return False
     
     @classmethod
-    async def _cache_lookup(cls, key: str, hash_str: str) -> Optional[bool]:
-        """Check cache for previous verification result"""
-        async with cls._cache_lock:
-            cache_key = f"{key}:{hash_str}"
-            if cache_key in cls._verify_cache:
-                result, timestamp = cls._verify_cache[cache_key]
-                if time.time() - timestamp <= cls._cache_ttl:
-                    return result
-                else:
-                    del cls._verify_cache[cache_key]
-            return None
-    
-    @classmethod
-    async def _cache_store(cls, key: str, hash_str: str, result: bool):
-        """Store verification result in cache"""
-        async with cls._cache_lock:
-            # Clean old entries if cache is full
-            if len(cls._verify_cache) >= cls._max_cache_size:
-                now = time.time()
-                cls._verify_cache = {
-                    k: v for k, v in cls._verify_cache.items()
-                    if now - v[1] <= cls._cache_ttl
-                }
-                
-                # If still full, remove oldest entries
-                if len(cls._verify_cache) >= cls._max_cache_size:
-                    sorted_items = sorted(cls._verify_cache.items(), key=lambda x: x[1][1])
-                    cls._verify_cache = dict(sorted_items[len(sorted_items)//2:])
-            
-            cache_key = f"{key}:{hash_str}"
-            cls._verify_cache[cache_key] = (result, time.time())
-    
-    @classmethod
-    def hash_key(cls, key: str, expiry_seconds: Optional[int] = None) -> str:
-        """Hash a key with metadata"""
-        try:
-            # Prepare metadata
-            meta = {}
-            if expiry_seconds:
-                meta['exp'] = time.time() + expiry_seconds
-            
-            # Add salt and hash
-            salted_key = f"{key}{cls._get_salt().hex()}"
-            hash_str = bcrypt_sha256.hash(salted_key, rounds=cls.HASH_ROUNDS)
-            
-            # Add metadata if needed
-            if meta:
-                return f"{hash_str}{cls.DELIMITER}{json.dumps(meta)}"
-            return hash_str
-            
-        except Exception as e:
-            logging.error(f"Hash error: {str(e)}")
-            raise
+    async def _verify_batch(cls, verifications: list) -> list:
+        """Verify multiple keys in parallel"""
+        loop = asyncio.get_running_loop()
+        tasks = []
+        
+        for key, hash_str in verifications:
+            task = loop.run_in_executor(
+                worker_pool.pool,
+                cls._verify_in_thread,
+                key,
+                hash_str
+            )
+            tasks.append(task)
+        
+        return await asyncio.gather(*tasks)
     
     @classmethod
     async def verify_key(cls, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
@@ -1478,12 +1443,17 @@ class KeySecurity:
                     return False, None
             
             # Check cache first
-            if cached_result := await cls._cache_lookup(key, hash_str):
-                return cached_result, full_hash
+            cache_key = f"{key}:{hash_str}"
+            async with cls._cache_lock:
+                if cache_key in cls._verify_cache:
+                    result, timestamp = cls._verify_cache[cache_key]
+                    if time.time() - timestamp <= cls._cache_ttl:
+                        return result, full_hash if result else None
+                    else:
+                        del cls._verify_cache[cache_key]
             
             # Verify in thread pool
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 worker_pool.pool,
                 cls._verify_in_thread,
                 key,
@@ -1491,13 +1461,33 @@ class KeySecurity:
             )
             
             # Cache result
-            await cls._cache_store(key, hash_str, result)
+            async with cls._cache_lock:
+                # Clean old entries if cache is full
+                if len(cls._verify_cache) >= cls._max_cache_size:
+                    now = time.time()
+                    cls._verify_cache = {
+                        k: v for k, v in cls._verify_cache.items()
+                        if now - v[1] <= cls._cache_ttl
+                    }
+                
+                cls._verify_cache[cache_key] = (result, time.time())
             
             return (result, full_hash) if result else (False, None)
             
         except Exception as e:
             logging.error(f"Verification error: {str(e)}")
             return False, None
+    
+    @classmethod
+    async def verify_keys_batch(cls, verifications: list) -> list:
+        """Verify multiple keys in parallel batches"""
+        results = []
+        
+        # Process in batches
+        for i in range(0, len(verifications), cls.BATCH_SIZE):
+            batch = verifications[i:i + cls.BATCH_SIZE]
+            batch_results = await cls._verify_batch(batch)
+            results.extend(batch_results)
 
 class KeyCleanup:
     def __init__(self, bot):
@@ -1901,7 +1891,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             )
 
             # Process in memory-efficient chunks
-            CHUNK_SIZE = 100
+            CHUNK_SIZE = 250  # Increased chunk size
             total_chunks = (len(key_list) + CHUNK_SIZE - 1) // CHUNK_SIZE
             
             added = 0
@@ -1931,25 +1921,45 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                     except ValueError:
                         invalid += 1
 
-                # Check for duplicates and add valid keys
-                for key in chunk_valid:
-                    exists = False
-                    for full_hash in list(guild_config.main_store):
-                        if (await KeySecurity.verify_key(key, full_hash))[0]:
-                            duplicates += 1
-                            exists = True
-                            break
+                if chunk_valid:
+                    # Prepare batch verification
+                    verifications = []
+                    for key in chunk_valid:
+                        for full_hash in list(guild_config.main_store):
+                            hash_str = full_hash.split(KeySecurity.DELIMITER)[0]
+                            verifications.append((key, hash_str))
                     
-                    if not exists:
-                        await guild_config.add_key(chunk_hashes[key], guild_id)
-                        added += 1
+                    # Batch verify
+                    if verifications:
+                        results = await KeySecurity.verify_keys_batch(verifications)
+                        
+                        # Process results
+                        result_idx = 0
+                        for key in chunk_valid:
+                            key_exists = False
+                            for _ in range(len(guild_config.main_store)):
+                                if results[result_idx]:
+                                    key_exists = True
+                                    break
+                                result_idx += 1
+                            
+                            if key_exists:
+                                duplicates += 1
+                            else:
+                                await guild_config.add_key(chunk_hashes[key], guild_id)
+                                added += 1
+                    else:
+                        # No existing keys to check against
+                        for key in chunk_valid:
+                            await guild_config.add_key(chunk_hashes[key], guild_id)
+                            added += 1
 
                 # Save progress periodically
-                if chunk_idx % 5 == 0:  # Save every 500 keys
+                if chunk_idx % 2 == 0:  # Save more frequently
                     await interaction.client.config.save()
                     
-                # Update progress every 1000 keys
-                if added > 0 and added % 1000 == 0:
+                # Update progress every 500 keys
+                if added > 0 and (added % 500 == 0 or chunk_idx == total_chunks - 1):
                     progress = (chunk_idx + 1) * 100 / total_chunks
                     await interaction.followup.send(
                         f"⏳ Progress: {progress:.1f}%\n"
