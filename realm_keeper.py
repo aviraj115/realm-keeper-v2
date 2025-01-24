@@ -1868,9 +1868,9 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
     keys = discord.ui.TextInput(
         label="Enter keys (one per line)",
         style=discord.TextStyle.long,
-        placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+        placeholder="Paste your keys here (UUIDs, one per line)",
         required=True,
-        max_length=2000
+        max_length=4000  # Increased to handle more keys
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -1895,60 +1895,82 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 )
                 return
 
-            # Validate key format
-            invalid_format = []
-            valid_keys = []
-            for key in key_list:
-                try:
-                    uuid_obj = uuid.UUID(key, version=4)
-                    if str(uuid_obj) != key.lower():
-                        invalid_format.append(key)
-                    else:
-                        valid_keys.append(key)
-                except ValueError:
-                    invalid_format.append(key)
+            await interaction.followup.send(
+                f"⏳ Processing {len(key_list)} keys...",
+                ephemeral=True
+            )
 
-            if not valid_keys:
-                msg = ["❌ No valid keys found!"]
-                if invalid_format:
-                    msg.append(f"• Invalid format: {len(invalid_format)}")
-                await interaction.followup.send(
-                    "\n".join(msg),
-                    ephemeral=True
-                )
-                return
-
-            # Add valid keys
+            # Process in memory-efficient chunks
+            CHUNK_SIZE = 100
+            total_chunks = (len(key_list) + CHUNK_SIZE - 1) // CHUNK_SIZE
+            
             added = 0
-            duplicates = []
-            for key in valid_keys:
-                # Check if key already exists
-                exists = False
-                for full_hash in list(guild_config.main_store):
-                    if (await KeySecurity.verify_key(key, full_hash))[0]:
-                        duplicates.append(key)
-                        exists = True
-                        break
+            duplicates = 0
+            invalid = 0
+            
+            # Process chunks
+            for chunk_idx in range(total_chunks):
+                start_idx = chunk_idx * CHUNK_SIZE
+                end_idx = min(start_idx + CHUNK_SIZE, len(key_list))
+                chunk = key_list[start_idx:end_idx]
                 
-                if not exists:
-                    # Add new key
-                    full_hash = KeySecurity.hash_key(key)
-                    await guild_config.add_key(full_hash, guild_id)
-                    added += 1
+                # Process chunk
+                chunk_valid = []
+                chunk_hashes = {}
+                
+                # Validate format first
+                for key in chunk:
+                    try:
+                        uuid_obj = uuid.UUID(key, version=4)
+                        if str(uuid_obj) == key.lower():
+                            chunk_valid.append(key)
+                            # Pre-compute hash
+                            chunk_hashes[key] = KeySecurity.hash_key(key)
+                        else:
+                            invalid += 1
+                    except ValueError:
+                        invalid += 1
 
+                # Check for duplicates and add valid keys
+                for key in chunk_valid:
+                    exists = False
+                    for full_hash in list(guild_config.main_store):
+                        if (await KeySecurity.verify_key(key, full_hash))[0]:
+                            duplicates += 1
+                            exists = True
+                            break
+                    
+                    if not exists:
+                        await guild_config.add_key(chunk_hashes[key], guild_id)
+                        added += 1
+
+                # Save progress periodically
+                if chunk_idx % 5 == 0:  # Save every 500 keys
+                    await interaction.client.config.save()
+                    
+                # Update progress every 1000 keys
+                if added > 0 and added % 1000 == 0:
+                    progress = (chunk_idx + 1) * 100 / total_chunks
+                    await interaction.followup.send(
+                        f"⏳ Progress: {progress:.1f}%\n"
+                        f"• Added: {added}\n"
+                        f"• Duplicates: {duplicates}\n"
+                        f"• Invalid: {invalid}",
+                        ephemeral=True
+                    )
+
+            # Final save
             await interaction.client.config.save()
             stats.log_keys_added(guild_id, added)
             await audit.log_key_add(interaction, added)
             
-            # Build response message
-            msg = [f"✅ Added {added} keys!"]
-            if duplicates:
-                msg.append(f"• Duplicates: {len(duplicates)}")
-            if invalid_format:
-                msg.append(f"• Invalid format: {len(invalid_format)}")
-            
+            # Final report
             await interaction.followup.send(
-                "\n".join(msg),
+                f"✅ Key processing complete!\n"
+                f"• Added: {added}\n"
+                f"• Duplicates: {duplicates}\n"
+                f"• Invalid: {invalid}\n"
+                f"• Total processed: {len(key_list)}",
                 ephemeral=True
             )
 
@@ -1956,36 +1978,36 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             logging.error(f"Key addition error: {str(e)}")
             try:
                 await interaction.followup.send(
-                    "❌ Failed to add keys!",
+                    "❌ Failed to add keys! Check the format and try again.",
                     ephemeral=True
                 )
             except:
                 pass
 
-class SetupModal(discord.ui.Modal, title="Realm Setup"):
+class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
     def __init__(self):
         super().__init__()
         self.add_item(discord.ui.TextInput(
-            label="Role Name",
-            placeholder="Enter the exact role name",
+            label="✨ Role Name",
+            placeholder="Enter the exact role name to grant",
             min_length=1,
             max_length=100,
             required=True
         ))
         self.add_item(discord.ui.TextInput(
-            label="Command Name",
-            placeholder="Enter command name (e.g. claim, verify, redeem)",
+            label="🔮 Command Name",
+            placeholder="Name for the claim command (e.g. claim, verify, unlock)",
             default="claim",
             min_length=1,
             max_length=32,
             required=True
         ))
         self.add_item(discord.ui.TextInput(
-            label="Initial Keys (optional, one per line)",
+            label="🗝️ Initial Keys",
             style=discord.TextStyle.paragraph,
-            placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+            placeholder="Optional: Paste your keys here (UUIDs, one per line)",
             required=False,
-            max_length=2000
+            max_length=4000  # Increased to handle more keys
         ))
     
     async def on_submit(self, interaction: discord.Interaction):
@@ -1996,12 +2018,12 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             # Get values from inputs
             role_name = self.children[0].value
             command_name = self.children[1].value.lower()
-            initial_keys = self.children[2].value.strip().split('\n') if self.children[2].value.strip() else []
+            initial_keys = [k.strip() for k in self.children[2].value.split('\n') if k.strip()] if self.children[2].value.strip() else []
 
             # Check if command name is valid
             if command_name in RESERVED_NAMES:
                 await interaction.followup.send(
-                    "❌ That command name is reserved! Please choose another.",
+                    "🚫 That command name is reserved! Please choose another.",
                     ephemeral=True
                 )
                 return
@@ -2010,7 +2032,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             role = discord.utils.get(interaction.guild.roles, name=role_name)
             if not role:
                 await interaction.followup.send(
-                    "❌ Role not found! Please enter the exact role name.",
+                    "🔍 Role not found! Please enter the exact role name.",
                     ephemeral=True
                 )
                 return
@@ -2019,7 +2041,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             bot_member = interaction.guild.me
             if not bot_member.guild_permissions.manage_roles:
                 await interaction.followup.send(
-                    "❌ Bot needs 'Manage Roles' permission!",
+                    "🔒 Bot needs 'Manage Roles' permission!",
                     ephemeral=True
                 )
                 return
@@ -2027,7 +2049,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             # Check if bot can manage the role
             if role >= bot_member.top_role:
                 await interaction.followup.send(
-                    "❌ Bot's highest role must be above the target role!",
+                    "⚠️ Bot's highest role must be above the target role!",
                     ephemeral=True
                 )
                 return
@@ -2035,7 +2057,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             # Check if role is managed by integration
             if role.managed:
                 await interaction.followup.send(
-                    "❌ Cannot use integration-managed roles!",
+                    "⚠️ Cannot use integration-managed roles!",
                     ephemeral=True
                 )
                 return
@@ -2043,7 +2065,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             # Check if role is @everyone
             if role.is_default():
                 await interaction.followup.send(
-                    "❌ Cannot use @everyone role!",
+                    "⚠️ Cannot use @everyone role!",
                     ephemeral=True
                 )
                 return
@@ -2052,53 +2074,92 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             guild_id = interaction.guild.id
             interaction.client.config.guilds[guild_id] = GuildConfig(
                 role_id=role.id,
-                valid_keys=set(),  # Initialize with empty set
+                valid_keys=set(),
                 command=command_name
             )
             
             # Process initial keys if provided
-            valid_keys = []
-            invalid_format = []
-            if initial_keys:
-                for key in initial_keys:
-                    key = key.strip()
-                    try:
-                        uuid_obj = uuid.UUID(key, version=4)
-                        if str(uuid_obj) == key.lower():
-                            valid_keys.append(key)
-                        else:
-                            invalid_format.append(key)
-                    except ValueError:
-                        invalid_format.append(key)
-
-            # Add valid keys if any
-            if valid_keys:
-                guild_config = interaction.client.config.guilds[guild_id]
-                for key in valid_keys:
-                    hashed = KeySecurity.hash_key(key)
-                    await guild_config.add_key(hashed, guild_id)
-                stats.log_keys_added(guild_id, len(valid_keys))
-                await audit.log_key_add(interaction, len(valid_keys))
+            added = 0
+            duplicates = 0
+            invalid = 0
             
-            # Save and sync
+            if initial_keys:
+                await interaction.followup.send(
+                    f"⏳ Processing {len(initial_keys)} initial keys...",
+                    ephemeral=True
+                )
+                
+                # Process in chunks
+                CHUNK_SIZE = 100
+                total_chunks = (len(initial_keys) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                
+                for chunk_idx in range(total_chunks):
+                    start_idx = chunk_idx * CHUNK_SIZE
+                    end_idx = min(start_idx + CHUNK_SIZE, len(initial_keys))
+                    chunk = initial_keys[start_idx:end_idx]
+                    
+                    # Process chunk
+                    chunk_valid = []
+                    chunk_hashes = {}
+                    
+                    # Validate format
+                    for key in chunk:
+                        try:
+                            uuid_obj = uuid.UUID(key, version=4)
+                            if str(uuid_obj) == key.lower():
+                                chunk_valid.append(key)
+                                chunk_hashes[key] = KeySecurity.hash_key(key)
+                            else:
+                                invalid += 1
+                        except ValueError:
+                            invalid += 1
+                    
+                    # Add valid keys
+                    guild_config = interaction.client.config.guilds[guild_id]
+                    for key in chunk_valid:
+                        await guild_config.add_key(chunk_hashes[key], guild_id)
+                        added += 1
+                    
+                    # Save periodically
+                    if chunk_idx % 5 == 0:
+                        await interaction.client.config.save()
+                        
+                    # Update progress for large batches
+                    if len(initial_keys) > 1000 and chunk_idx % 10 == 0:
+                        progress = (chunk_idx + 1) * 100 / total_chunks
+                        await interaction.followup.send(
+                            f"⏳ Setup progress: {progress:.1f}%\n"
+                            f"• Keys added: {added}\n"
+                            f"• Invalid format: {invalid}",
+                            ephemeral=True
+                        )
+            
+            # Save final state
             await interaction.client.config.save()
+            if added > 0:
+                stats.log_keys_added(guild_id, added)
+                await audit.log_key_add(interaction, added)
+            
+            # Create command
             success = await create_dynamic_command(command_name, guild_id, interaction.client)
             
-            # Build response message
+            # Build final response
             response = [
-                "✅ Setup complete!",
+                "✨ Realm setup complete!",
                 f"• Role: {role.mention}",
-                f"• Command: /{command_name}"
+                f"• Command: `/{command_name}`"
             ]
-            if valid_keys:
-                response.append(f"• Added {len(valid_keys)} keys")
-                if invalid_format:
-                    response.append(f"• Skipped {len(invalid_format)} invalid keys")
+            
+            if initial_keys:
+                response.extend([
+                    f"• Keys added: {added}",
+                    f"• Invalid format: {invalid}"
+                ])
             else:
-                response.append("• Add keys with /addkey or /addkeys")
+                response.append("• Use `/addkeys` to add your keys")
             
             if not success:
-                response.append("⚠️ Failed to create command, use /sync to retry")
+                response.append("⚠️ Command creation failed - use `/sync` to retry")
             
             await interaction.followup.send(
                 "\n".join(response),
@@ -2109,7 +2170,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             logging.error(f"Setup error: {e}")
             try:
                 await interaction.followup.send(
-                    "❌ Setup failed!",
+                    "💔 Setup failed! Please try again.",
                     ephemeral=True
                 )
             except:
