@@ -1882,7 +1882,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
         style=discord.TextStyle.long,
         placeholder="Paste your keys here (UUIDs, one per line)",
         required=True,
-        max_length=4000  # Increased to handle more keys
+        max_length=4000
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -1913,11 +1913,10 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             )
 
             # Process in memory-efficient chunks
-            CHUNK_SIZE = 250  # Increased chunk size
+            CHUNK_SIZE = 500  # Increased chunk size
             total_chunks = (len(key_list) + CHUNK_SIZE - 1) // CHUNK_SIZE
             
             added = 0
-            duplicates = 0
             invalid = 0
             
             # Process chunks
@@ -1927,15 +1926,13 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 chunk = key_list[start_idx:end_idx]
                 
                 # Process chunk
-                chunk_valid = []
                 chunk_hashes = {}
                 
-                # Validate format first
+                # Validate format and pre-compute hashes
                 for key in chunk:
                     try:
                         uuid_obj = uuid.UUID(key, version=4)
                         if str(uuid_obj) == key.lower():
-                            chunk_valid.append(key)
                             # Pre-compute hash
                             chunk_hashes[key] = KeySecurity.hash_key(key)
                         else:
@@ -1943,50 +1940,23 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                     except ValueError:
                         invalid += 1
 
-                if chunk_valid:
-                    # Prepare batch verification
-                    verifications = []
-                    for key in chunk_valid:
-                        for full_hash in list(guild_config.main_store):
-                            hash_str = full_hash.split(KeySecurity.DELIMITER)[0]
-                            verifications.append((key, hash_str))
-                    
-                    # Batch verify
-                    if verifications:
-                        results = await KeySecurity.verify_keys_batch(verifications)
-                        
-                        # Process results
-                        result_idx = 0
-                        for key in chunk_valid:
-                            key_exists = False
-                            for _ in range(len(guild_config.main_store)):
-                                if results[result_idx]:
-                                    key_exists = True
-                                    break
-                                result_idx += 1
-                            
-                            if key_exists:
-                                duplicates += 1
-                            else:
-                                await guild_config.add_key(chunk_hashes[key], guild_id)
-                                added += 1
-                    else:
-                        # No existing keys to check against
-                        for key in chunk_valid:
-                            await guild_config.add_key(chunk_hashes[key], guild_id)
-                            added += 1
+                # Add valid keys in bulk
+                if chunk_hashes:
+                    # Add new keys directly
+                    for key, hash_value in chunk_hashes.items():
+                        await guild_config.add_key(hash_value, guild_id)
+                        added += 1
 
                 # Save progress periodically
                 if chunk_idx % 2 == 0:  # Save more frequently
                     await interaction.client.config.save()
                     
-                # Update progress every 500 keys
-                if added > 0 and (added % 500 == 0 or chunk_idx == total_chunks - 1):
+                # Update progress every 1000 keys
+                if added > 0 and (added % 1000 == 0 or chunk_idx == total_chunks - 1):
                     progress = (chunk_idx + 1) * 100 / total_chunks
                     await interaction.followup.send(
                         f"⏳ Progress: {progress:.1f}%\n"
                         f"• Added: {added}\n"
-                        f"• Duplicates: {duplicates}\n"
                         f"• Invalid: {invalid}",
                         ephemeral=True
                     )
@@ -2000,7 +1970,6 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             await interaction.followup.send(
                 f"✅ Key processing complete!\n"
                 f"• Added: {added}\n"
-                f"• Duplicates: {duplicates}\n"
                 f"• Invalid: {invalid}\n"
                 f"• Total processed: {len(key_list)}",
                 ephemeral=True
