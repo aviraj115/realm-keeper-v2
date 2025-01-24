@@ -1685,6 +1685,23 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 )
                 return
 
+            # Get role first to do early checks
+            role = interaction.guild.get_role(guild_config.role_id)
+            if not role:
+                await interaction.followup.send(
+                    "⚠️ The destined role has vanished from this realm! Seek the council of an elder.", 
+                    ephemeral=True
+                )
+                return
+
+            # Check if user already has the role
+            if role in interaction.user.roles:
+                await interaction.followup.send(
+                    "🎭 You have already been blessed with the powers of this role!", 
+                    ephemeral=True
+                )
+                return
+
             # Check cooldown
             user_id = interaction.user.id
             if not interaction.user.guild_permissions.administrator:
@@ -1720,15 +1737,6 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                     # Remove key and grant role
                     await guild_config.remove_key(full_hash, guild_id)
                     await interaction.client.config.save()
-                    
-                    # Get role
-                    role = interaction.guild.get_role(guild_config.role_id)
-                    if not role:
-                        await interaction.followup.send(
-                            "⚠️ The destined role has vanished from this realm! Seek the council of an elder.", 
-                            ephemeral=True
-                        )
-                        return
                     
                     # Add role
                     try:
