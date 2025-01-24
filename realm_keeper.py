@@ -453,10 +453,20 @@ class GuildConfig:
     
     async def bulk_add_keys(self, hashes: Set[str], guild_id: int):
         """Add multiple keys efficiently"""
-        self.main_store.update(hashes)
-        for full_hash in hashes:
+        # Ensure all hashes are properly formatted
+        formatted_hashes = set()
+        for h in hashes:
+            if KeySecurity.DELIMITER in h:
+                formatted_hashes.add(h)
+            else:
+                formatted_hashes.add(h)
+        
+        self.main_store.update(formatted_hashes)
+        # Update Bloom filter with key parts
+        for full_hash in formatted_hashes:
             hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
             self.bloom.add(hash_part)
+        
         await key_cache.invalidate(guild_id)
     
     # Alias for compatibility
@@ -1564,17 +1574,16 @@ class KeySecurity:
     def hash_key(cls, key: str, expiry_seconds: Optional[int] = None) -> str:
         """Hash a key with metadata"""
         try:
-            # Prepare metadata
-            meta = {}
-            if expiry_seconds:
-                meta['exp'] = time.time() + expiry_seconds
+            # Normalize key format
+            key = key.strip().lower()
             
             # Add salt and hash with reduced rounds
             salted_key = f"{key}{cls._get_salt().hex()}"
             hash_str = bcrypt_sha256.hash(salted_key, rounds=cls.HASH_ROUNDS)
             
             # Add metadata if needed
-            if meta:
+            if expiry_seconds:
+                meta = {'exp': time.time() + expiry_seconds}
                 return f"{hash_str}{cls.DELIMITER}{json.dumps(meta)}"
             return hash_str
             
@@ -1875,7 +1884,6 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 return
 
             # Check cooldown
-            user_id = interaction.user.id
             if not interaction.user.guild_permissions.administrator:
                 retry_after = claim_cooldown.get_retry_after(interaction)
                 if retry_after:
@@ -1887,7 +1895,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                     )
                     return
 
-            # Validate key format
+            # Validate and normalize key format
             key_value = self.key.value.strip().lower()
             try:
                 uuid_obj = uuid.UUID(key_value, version=4)
@@ -1900,10 +1908,10 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 )
                 return
 
-            # Direct hash lookup first
+            # Try direct hash lookup first
             key_hash = KeySecurity.hash_key(key_value)
             if key_hash in guild_config.main_store:
-                # Key found directly - remove and grant role
+                # Key found - remove and grant role
                 await guild_config.remove_key(key_hash, guild_id)
                 await interaction.client.config.save()
                 
@@ -1945,22 +1953,15 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
                 )
                 return
 
-            # Final check with cache and batch verification
-            matches = await key_cache.get_matches(guild_id, key_value)
-            if matches is None:
-                matches = guild_config.main_store
-
-            # Verify in parallel batches
-            verifications = [(key_value, h) for h in matches]
-            results = await KeySecurity.verify_keys_batch(verifications)
-
-            # Process results
+            # Final verification attempt
             key_found = False
             valid_hash = None
-            for i, is_valid in enumerate(results):
-                if is_valid:
+            
+            # Try each hash in the store
+            for stored_hash in guild_config.main_store:
+                if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
                     key_found = True
-                    valid_hash = verifications[i][1]
+                    valid_hash = stored_hash
                     break
 
             if key_found and valid_hash:
