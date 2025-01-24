@@ -1477,8 +1477,7 @@ async def memory_check():
 async def monitor_workers():
     """Monitor and adjust worker pools"""
     try:
-        for guild_id, guild_config in bot.config.guilds.items():
-            worker_pool = bot.realm_keeper.worker_pool
+        for guild_id, guild_config in config.items():
             queue_size = worker_pool.pool._work_queue.qsize()
             active_workers = len(worker_pool.pool._threads)
             
