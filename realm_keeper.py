@@ -1227,6 +1227,137 @@ class RealmKeeper(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="loadkeys", description="📄 Load keys from a text file")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def loadkeys(self, interaction: discord.Interaction, file: discord.Attachment):
+        """Load keys from a text file"""
+        try:
+            # Validate file
+            if not file.filename.endswith('.txt'):
+                await interaction.response.send_message(
+                    "❌ Please provide a .txt file!",
+                    ephemeral=True
+                )
+                return
+                
+            if file.size > 10 * 1024 * 1024:  # 10MB limit
+                await interaction.response.send_message(
+                    "❌ File too large! Maximum size is 10MB.",
+                    ephemeral=True
+                )
+                return
+
+            # Defer response for long operation
+            await interaction.response.defer(ephemeral=True)
+            
+            # Get guild config
+            guild_id = interaction.guild.id
+            if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
+                await interaction.followup.send(
+                    "❌ Run /setup first!", 
+                    ephemeral=True
+                )
+                return
+
+            # Read file content
+            content = await file.read()
+            try:
+                text = content.decode('utf-8')
+            except UnicodeDecodeError:
+                await interaction.followup.send(
+                    "❌ Invalid file encoding! Please use UTF-8.",
+                    ephemeral=True
+                )
+                return
+
+            # Process keys
+            key_list = [k.strip() for k in text.split('\n') if k.strip()]
+            if not key_list:
+                await interaction.followup.send(
+                    "❌ No keys found in file!", 
+                    ephemeral=True
+                )
+                return
+
+            await interaction.followup.send(
+                f"⏳ Processing {len(key_list)} keys from {file.filename}...",
+                ephemeral=True
+            )
+
+            # Process in memory-efficient chunks
+            CHUNK_SIZE = 500
+            total_chunks = (len(key_list) + CHUNK_SIZE - 1) // CHUNK_SIZE
+            
+            added = 0
+            invalid = 0
+            
+            # Process chunks
+            for chunk_idx in range(total_chunks):
+                start_idx = chunk_idx * CHUNK_SIZE
+                end_idx = min(start_idx + CHUNK_SIZE, len(key_list))
+                chunk = key_list[start_idx:end_idx]
+                
+                # Process chunk
+                chunk_hashes = {}
+                
+                # Validate format and pre-compute hashes
+                for key in chunk:
+                    try:
+                        uuid_obj = uuid.UUID(key, version=4)
+                        if str(uuid_obj) == key.lower():
+                            # Pre-compute hash
+                            chunk_hashes[key] = KeySecurity.hash_key(key)
+                        else:
+                            invalid += 1
+                    except ValueError:
+                        invalid += 1
+
+                # Add valid keys in bulk
+                if chunk_hashes:
+                    # Add new keys directly
+                    for key, hash_value in chunk_hashes.items():
+                        await guild_config.add_key(hash_value, guild_id)
+                        added += 1
+
+                # Save progress periodically
+                if chunk_idx % 2 == 0:
+                    await interaction.client.config.save()
+                    
+                # Update progress every 1000 keys
+                if added > 0 and (added % 1000 == 0 or chunk_idx == total_chunks - 1):
+                    progress = (chunk_idx + 1) * 100 / total_chunks
+                    await interaction.followup.send(
+                        f"⏳ Progress: {progress:.1f}%\n"
+                        f"• Added: {added}\n"
+                        f"• Invalid: {invalid}",
+                        ephemeral=True
+                    )
+
+            # Final save
+            await interaction.client.config.save()
+            stats.log_keys_added(guild_id, added)
+            await audit.log_key_add(interaction, added)
+            
+            # Final report
+            await interaction.followup.send(
+                f"✅ File processing complete!\n"
+                f"• Added: {added}\n"
+                f"• Invalid: {invalid}\n"
+                f"• Total processed: {len(key_list)}",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logging.error(f"File processing error: {str(e)}")
+            try:
+                await interaction.followup.send(
+                    "❌ Failed to process file! Please try again.",
+                    ephemeral=True
+                )
+            except:
+                pass
+
 class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
     keys = discord.ui.TextInput(
         label="Enter keys to remove (one per line)",
