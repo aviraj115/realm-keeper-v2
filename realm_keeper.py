@@ -45,38 +45,38 @@ logging.basicConfig(
 
 # Default messages for successful key claims
 DEFAULT_SUCCESS_MESSAGES = [
-    # Magical/Fantasy themed
-    "✨ {user} has unlocked the {role} role!",
-    "🎉 Welcome to {role}, {user}!",
-    "🌟 {user} has joined the {role} ranks!",
-    "🔓 Access granted! {user} now has the {role} role!",
-    "⚡ {user} has activated their {role} powers!",
-    "🎭 The {role} welcomes their newest member, {user}!",
-    "🔮 {user} has discovered the secrets of {role}!",
-    "⚔️ {user} has proven worthy of the {role} rank!",
-    "🏰 The gates of {role} open for {user}!",
-    "🌈 {user} has crossed the bridge to {role}!",
+    # Epic Fantasy themed
+    "🌟 The ancient scrolls have recognized {user} as a true {role}!",
+    "⚔️ Through trials of valor, {user} ascends to the ranks of {role}!",
+    "✨ The mystical gates of {role} part before {user}'s destined arrival!",
+    "🔮 The oracles have foreseen it - {user} joins the sacred order of {role}!",
+    "🏰 The grand halls of {role} echo with cheers as {user} takes their rightful place!",
+    "⚡ By the power of the ancients, {user} is bestowed the mantle of {role}!",
+    "🎭 The prophecy is fulfilled - {user} awakens to their destiny as {role}!",
+    "🌈 Through arcane mysteries, {user} transcends to become {role}!",
+    "🗝️ The forbidden knowledge of {role} unveils itself to {user}!",
+    "🌠 Stars align as {user} is chosen by the ancient spirits of {role}!",
     
-    # Tech/Hacker themed
-    "🚀 {user} has deployed to {role}!",
-    "💻 {user} has gained root access to {role}!",
-    "🔑 Authentication successful! Welcome to {role}, {user}!",
-    "🌐 {user} has connected to the {role} network!",
-    "⚡ System upgrade complete: {user} → {role}!",
+    # Mystical themed
+    "🧙‍♂️ The arcane circle welcomes {user} to the mysteries of {role}!",
+    "🔥 Sacred flames dance as {user} is initiated into {role}!",
+    "💫 The ethereal winds carry {user} to the realm of {role}!",
+    "🌙 Under the mystic moon, {user} transforms into {role}!",
+    "🎋 Ancient runes glow as {user} discovers their path to {role}!",
     
-    # Adventure themed
-    "🗺️ {user} has discovered the {role} realm!",
-    "🎯 {user} has reached their destination: {role}!",
-    "🌟 A new star rises in {role}: Welcome {user}!",
-    "🎪 {user} has joined the {role} circus!",
-    "🌈 {user} found the treasure at the end of {role}!",
+    # Dark Fantasy themed
+    "⚔️ Through shadow and flame, {user} claims their place among {role}!",
+    "🗡️ The dark prophecy speaks true - {user} rises as {role}!",
+    "🦇 From the depths of mystery, {user} emerges as {role}!",
+    "🕯️ By blood and oath, {user} is bound to the powers of {role}!",
+    "🌑 In darkness ascending, {user} becomes one with {role}!",
     
-    # Game themed
-    "🎮 {user} has unlocked the {role} achievement!",
-    "🏆 {user} has earned the {role} trophy!",
-    "⬆️ {user} has leveled up to {role}!",
-    "🎲 {user} rolled a natural 20 and gained {role}!",
-    "🎯 Critical hit! {user} joins {role}!"
+    # Mythological themed
+    "⚡ By divine decree, {user} ascends to {role}!",
+    "🏺 The ancient gods smile upon {user}'s journey to {role}!",
+    "🌺 Like a phoenix reborn, {user} rises as {role}!",
+    "🎭 The fates themselves weave {user} into the tapestry of {role}!",
+    "🌟 Written in the stars, {user} fulfills their destiny as {role}!"
 ]
 
 # Stats tracking
@@ -340,6 +340,13 @@ class RealmBot(commands.AutoShardedBot):
     async def on_ready(self):
         """Called when bot is ready"""
         try:
+            # Set custom activity
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name="over mystical realms ✨"
+            )
+            await self.change_presence(activity=activity)
+            
             # Sync commands after bot is ready
             await self.tree.sync()
             logging.info("✅ Commands synced globally")
@@ -1638,10 +1645,10 @@ class KeyLocks:
 # Initialize lock manager
 key_locks = KeyLocks()
 
-class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
+class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
     key = discord.ui.TextInput(
-        label="Enter your key",
-        placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+        label="✨ Present Your Arcane Key",
+        placeholder="Inscribe your mystical key (format: xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx)",
         min_length=36,
         max_length=36,
         required=True
@@ -1655,7 +1662,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
             guild_id = interaction.guild.id
             if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
                 await interaction.followup.send(
-                    "❌ This server is not setup!", 
+                    "🌌 The mystical gateway has not yet been established in this realm!", 
                     ephemeral=True
                 )
                 return
@@ -1668,7 +1675,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
                     minutes = int(retry_after / 60)
                     seconds = int(retry_after % 60)
                     await interaction.followup.send(
-                        f"⏳ Please wait {minutes}m {seconds}s before trying again!",
+                        f"⌛ The arcane energies must replenish... Return in {minutes}m {seconds}s.",
                         ephemeral=True
                     )
                     return
@@ -1681,7 +1688,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
                     raise ValueError()
             except ValueError:
                 await interaction.followup.send(
-                    "❌ Invalid key format!", 
+                    "📜 This key's pattern is foreign to our mystic tomes...", 
                     ephemeral=True
                 )
                 return
@@ -1700,7 +1707,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
                     role = interaction.guild.get_role(guild_config.role_id)
                     if not role:
                         await interaction.followup.send(
-                            "❌ Role not found! Please contact an admin.", 
+                            "⚠️ The destined role has vanished from this realm! Seek the council of an elder.", 
                             ephemeral=True
                         )
                         return
@@ -1710,14 +1717,14 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
                         await interaction.user.add_roles(role)
                     except discord.Forbidden:
                         await interaction.followup.send(
-                            "❌ I don't have permission to give you that role!", 
+                            "🔒 The mystical barriers prevent me from bestowing this power!", 
                             ephemeral=True
                         )
                         return
                     except Exception as e:
                         logging.error(f"Role grant error: {str(e)}")
                         await interaction.followup.send(
-                            "❌ Failed to give you the role!", 
+                            "💔 The ritual of bestowal has failed!", 
                             ephemeral=True
                         )
                         return
@@ -1741,7 +1748,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
                 stats.log_claim(guild_id, False)
                 await audit.log_claim(interaction, False)
                 await interaction.followup.send(
-                    "❌ Invalid key!", 
+                    "🌑 This key holds no power in these lands...", 
                     ephemeral=True
                 )
 
