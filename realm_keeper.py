@@ -1914,72 +1914,29 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 )
                 return
 
-            # Quick check using Bloom filter
-            if key_value not in guild_config.bloom:
-                stats.log_claim(guild_id, False)
-                await audit.log_claim(interaction, False)
-                await interaction.followup.send(
-                    "🌑 This key holds no power in these lands...", 
-                    ephemeral=True
-                )
-                return
-
-            # Generate hash for direct lookup
-            key_hash = KeySecurity.hash_key(key_value)
+            # Make a copy of the keys to avoid modification during iteration
+            stored_keys = list(guild_config.main_store)
             
-            # Direct hash lookup first (fastest)
-            if key_hash in guild_config.main_store:
-                # Remove key and grant role
-                await guild_config.remove_key(key_hash, guild_id)
-                await interaction.client.config.save()
-                
-                try:
-                    await interaction.user.add_roles(role)
-                    stats.log_claim(guild_id, True)
-                    await audit.log_claim(interaction, True)
-                    
-                    success_msg = random.choice(guild_config.success_msgs)
-                    await interaction.followup.send(
-                        success_msg.format(
-                            user=interaction.user.mention,
-                            role=role.mention
-                        ),
-                        ephemeral=True
-                    )
-                    return
-                except discord.Forbidden:
-                    await interaction.followup.send(
-                        "🔒 The mystical barriers prevent me from bestowing this power!", 
-                        ephemeral=True
-                    )
-                    return
-                except Exception as e:
-                    logging.error(f"Role grant error: {str(e)}")
-                    await interaction.followup.send(
-                        "💔 The ritual of bestowal has failed!", 
-                        ephemeral=True
-                    )
-                    return
-
-            # If direct lookup fails, check cache
-            matches = await key_cache.get_matches(guild_id, key_value)
-            if matches is None:
-                matches = set()  # Empty set if no cache matches
-
-            # Only verify against cached matches or a small subset
+            # Try to find a matching key
             key_found = False
             valid_hash = None
             
-            # Try each potential match
-            for stored_hash in matches:
-                try:
-                    if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
-                        key_found = True
-                        valid_hash = stored_hash
-                        break
-                except Exception as e:
-                    logging.error(f"Key verification error: {e}")
-                    continue
+            # First try direct hash match (fastest)
+            key_hash = KeySecurity.hash_key(key_value)
+            if key_hash in stored_keys:
+                key_found = True
+                valid_hash = key_hash
+            else:
+                # Try each stored hash
+                for stored_hash in stored_keys:
+                    try:
+                        if (await KeySecurity.verify_key(key_value, stored_hash))[0]:
+                            key_found = True
+                            valid_hash = stored_hash
+                            break
+                    except Exception as e:
+                        logging.error(f"Key verification error: {e}")
+                        continue
 
             if key_found and valid_hash:
                 # Remove key and grant role
