@@ -577,10 +577,18 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                 await progress_msg.edit(content="❌ Invalid key format!")
                 return
 
+            # Use quick lookup to find potential matches
+            quick_hash = hashlib.sha256(key_value.encode()).hexdigest()[:8]
+            possible_hashes = guild_config.quick_lookup.get(quick_hash, set())
+            
+            if not possible_hashes:
+                await progress_msg.edit(content="❌ Invalid key or already claimed!")
+                return
+
             # Verify and process key
             async with key_locks[guild_id][get_shard(user.id)]:
-                # Find matching key
-                for full_hash in list(guild_config.main_store):
+                # Try each potential match
+                for full_hash in possible_hashes:
                     is_valid, updated_hash = KeySecurity.verify_key(key_value, full_hash)
                     if is_valid:
                         # Remove old hash
@@ -602,7 +610,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                         )
                         return
 
-                # Key not found or invalid
+                # No valid matches found
                 await progress_msg.edit(content="❌ Invalid key or already claimed!")
                 
         except Exception as e:
