@@ -1869,7 +1869,6 @@ class ArcaneGatewayModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Defer response to prevent timeout
             await interaction.response.defer(ephemeral=True)
             
             guild_id = interaction.guild.id
@@ -1902,10 +1901,11 @@ class ArcaneGatewayModal(discord.ui.Modal):
                     return
 
             # Validate and normalize key format
-            key_value = self.children[0].value.strip().lower()
+            key_value = self.children[0].value.strip()
             try:
                 uuid_obj = uuid.UUID(key_value, version=4)
-                if str(uuid_obj) != key_value:
+                key_lower = str(uuid_obj).lower()  # Normalize to canonical UUID format
+                if key_lower != key_value.lower():
                     raise ValueError()
             except ValueError:
                 await interaction.followup.send(
@@ -1914,10 +1914,22 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 )
                 return
 
-            # Direct key lookup
-            if key_value in guild_config.main_store:
+            # Quick check using bloom filter
+            if key_lower not in guild_config.bloom:
+                stats.log_claim(guild_id, False)
+                await audit.log_claim(interaction, False)
+                await interaction.followup.send(
+                    "🌑 This key holds no power in these lands...", 
+                    ephemeral=True
+                )
+                return
+
+            # Generate hash and check
+            key_hash = KeySecurity.hash_key(key_lower)
+            if key_hash in guild_config.main_store:
                 # Remove key and grant role
-                guild_config.main_store.remove(key_value)
+                guild_config.main_store.remove(key_hash)
+                guild_config.bloom.remove(key_lower) if hasattr(guild_config.bloom, 'remove') else None
                 await interaction.client.config.save()
                 
                 try:
@@ -2049,33 +2061,23 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            # Defer response to prevent timeout
             await interaction.response.defer(ephemeral=True)
             
             guild_id = interaction.guild.id
             if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
-                await interaction.followup.send(
-                    "❌ Run /setup first!", 
-                    ephemeral=True
-                )
+                await interaction.followup.send("❌ Run /setup first!", ephemeral=True)
                 return
 
-            # Parse and validate keys
+            # Parse keys
             key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
             if not key_list:
-                await interaction.followup.send(
-                    "❌ No keys provided!", 
-                    ephemeral=True
-                )
+                await interaction.followup.send("❌ No keys provided!", ephemeral=True)
                 return
 
-            await interaction.followup.send(
-                f"⏳ Processing {len(key_list)} keys...",
-                ephemeral=True
-            )
+            await interaction.followup.send(f"⏳ Processing {len(key_list)} keys...", ephemeral=True)
 
-            # Process in memory-efficient chunks
-            CHUNK_SIZE = 500  # Increased chunk size
+            # Process in chunks
+            CHUNK_SIZE = 500
             total_chunks = (len(key_list) + CHUNK_SIZE - 1) // CHUNK_SIZE
             
             added = 0
@@ -2091,11 +2093,12 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 for key in chunk:
                     try:
                         uuid_obj = uuid.UUID(key, version=4)
-                        if str(uuid_obj) == key.lower():
-                            # Store normalized key directly
-                            key_lower = key.lower()
-                            guild_config.main_store.add(key_lower)
-                            guild_config.bloom.add(key_lower)
+                        key_lower = str(uuid_obj).lower()  # Normalize to canonical UUID format
+                        if key_lower == key.lower():
+                            # Store both the key and its hash
+                            key_hash = KeySecurity.hash_key(key_lower)
+                            guild_config.main_store.add(key_hash)
+                            guild_config.bloom.add(key_lower)  # Store normalized key in bloom filter
                             added += 1
                         else:
                             invalid += 1
@@ -2103,10 +2106,10 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                         invalid += 1
 
                 # Save progress periodically
-                if chunk_idx % 2 == 0:  # Save more frequently
+                if chunk_idx % 2 == 0:
                     await interaction.client.config.save()
                     
-                # Update progress every 1000 keys
+                # Update progress
                 if added > 0 and (added % 1000 == 0 or chunk_idx == total_chunks - 1):
                     progress = (chunk_idx + 1) * 100 / total_chunks
                     await interaction.followup.send(
@@ -2121,7 +2124,6 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             stats.log_keys_added(guild_id, added)
             await audit.log_key_add(interaction, added)
             
-            # Final report
             await interaction.followup.send(
                 f"✅ Key processing complete!\n"
                 f"• Added: {added}\n"
