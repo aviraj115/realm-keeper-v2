@@ -781,17 +781,17 @@ async def load_config():
         logging.error(f"Failed to load config: {str(e)}")
         config = {}
 
-async def create_dynamic_command(command_name: str, guild_id: int):
+async def create_dynamic_command(command_name: str, guild_id: int, client: discord.Client):
     """Create a dynamic claim command for a guild"""
-    guild = bot.get_guild(guild_id)
+    guild = client.get_guild(guild_id)
     if not guild:
-            return
+        return
 
     # Remove existing command if it exists
     try:
-        existing = bot.tree.get_command(command_name, guild=guild)
+        existing = client.tree.get_command(command_name, guild=guild)
         if existing:
-            bot.tree.remove_command(command_name, guild=guild)
+            client.tree.remove_command(command_name, guild=guild)
     except:
         pass
 
@@ -802,8 +802,8 @@ async def create_dynamic_command(command_name: str, guild_id: int):
             return
         await interaction.response.send_modal(ArcaneGatewayModal())
 
-    bot.tree.add_command(dynamic_claim, guild=guild)
-    await bot.tree.sync(guild=guild)
+    client.tree.add_command(dynamic_claim, guild=guild)
+    await client.tree.sync(guild=guild)
 
 class CommandSync:
     def __init__(self, bot):
@@ -1662,6 +1662,9 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Defer response to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
             # Get values from inputs
             role_name = self.children[0].value
             command_name = self.children[1].value.lower()
@@ -1669,7 +1672,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
 
             # Check if command name is valid
             if command_name in RESERVED_NAMES:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ That command name is reserved! Please choose another.",
                     ephemeral=True
                 )
@@ -1678,7 +1681,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             # Find role by name
             role = discord.utils.get(interaction.guild.roles, name=role_name)
             if not role:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Role not found! Please enter the exact role name.",
                     ephemeral=True
                 )
@@ -1687,7 +1690,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             # Validate bot permissions
             bot_member = interaction.guild.me
             if not bot_member.guild_permissions.manage_roles:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Bot needs 'Manage Roles' permission!",
                     ephemeral=True
                 )
@@ -1695,7 +1698,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
 
             # Check if bot can manage the role
             if role >= bot_member.top_role:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Bot's highest role must be above the target role!",
                     ephemeral=True
                 )
@@ -1703,7 +1706,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
 
             # Check if role is managed by integration
             if role.managed:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Cannot use integration-managed roles!",
                     ephemeral=True
                 )
@@ -1711,7 +1714,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
 
             # Check if role is @everyone
             if role.is_default():
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Cannot use @everyone role!",
                     ephemeral=True
                 )
@@ -1749,7 +1752,7 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             
             # Save and sync
             await interaction.client.config.save()
-            await create_dynamic_command(command_name, guild_id)
+            await create_dynamic_command(command_name, guild_id, interaction.client)
             
             # Build response message
             response = [
@@ -1764,17 +1767,20 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             else:
                 response.append("• Add keys with /addkey or /addkeys")
             
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "\n".join(response),
                 ephemeral=True
             )
             
         except Exception as e:
             logging.error(f"Setup error: {e}")
-            await interaction.response.send_message(
-                "❌ Setup failed!",
-                ephemeral=True
-            )
+            try:
+                await interaction.followup.send(
+                    "❌ Setup failed!",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
     keys = discord.ui.TextInput(
