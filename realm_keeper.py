@@ -306,7 +306,7 @@ async def on_ready():
         try:
             await create_dynamic_command(guild_config.command, guild_id)
             restored += 1
-    except Exception as e:
+        except Exception as e:
             logging.error(f"Failed to restore command for guild {guild_id}: {e}")
     
     logging.info(f"Restored {restored} custom commands")
@@ -608,7 +608,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
             return
 
                 # No valid matches found
-                await progress_msg.edit(content="❌ Invalid key or already claimed!")
+            await progress_msg.edit(content="❌ Invalid key or already claimed!")
                 
         except Exception as e:
             logging.error(f"Claim error: {str(e)}")
