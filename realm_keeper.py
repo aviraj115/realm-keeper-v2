@@ -43,6 +43,42 @@ logging.basicConfig(
     ]
 )
 
+# Default messages for successful key claims
+DEFAULT_SUCCESS_MESSAGES = [
+    # Magical/Fantasy themed
+    "✨ {user} has unlocked the {role} role!",
+    "🎉 Welcome to {role}, {user}!",
+    "🌟 {user} has joined the {role} ranks!",
+    "🔓 Access granted! {user} now has the {role} role!",
+    "⚡ {user} has activated their {role} powers!",
+    "🎭 The {role} welcomes their newest member, {user}!",
+    "🔮 {user} has discovered the secrets of {role}!",
+    "⚔️ {user} has proven worthy of the {role} rank!",
+    "🏰 The gates of {role} open for {user}!",
+    "🌈 {user} has crossed the bridge to {role}!",
+    
+    # Tech/Hacker themed
+    "🚀 {user} has deployed to {role}!",
+    "💻 {user} has gained root access to {role}!",
+    "🔑 Authentication successful! Welcome to {role}, {user}!",
+    "🌐 {user} has connected to the {role} network!",
+    "⚡ System upgrade complete: {user} → {role}!",
+    
+    # Adventure themed
+    "🗺️ {user} has discovered the {role} realm!",
+    "🎯 {user} has reached their destination: {role}!",
+    "🌟 A new star rises in {role}: Welcome {user}!",
+    "🎪 {user} has joined the {role} circus!",
+    "🌈 {user} found the treasure at the end of {role}!",
+    
+    # Game themed
+    "🎮 {user} has unlocked the {role} achievement!",
+    "🏆 {user} has earned the {role} trophy!",
+    "⬆️ {user} has leveled up to {role}!",
+    "🎲 {user} rolled a natural 20 and gained {role}!",
+    "🎯 Critical hit! {user} joins {role}!"
+]
+
 # Set event loop policy for Windows if needed
 if platform.system() == 'Windows':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
