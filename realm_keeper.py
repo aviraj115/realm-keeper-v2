@@ -1490,12 +1490,20 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
             max_length=32,
             required=True
         ))
+        self.add_item(discord.ui.TextInput(
+            label="Initial Keys (optional, one per line)",
+            style=discord.TextStyle.paragraph,
+            placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+            required=False,
+            max_length=2000
+        ))
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
             # Get values from inputs
             role_name = self.children[0].value
             command_name = self.children[1].value.lower()
+            initial_keys = self.children[2].value.strip().split('\n') if self.children[2].value.strip() else []
 
             # Check if command name is valid
             if command_name in RESERVED_NAMES:
@@ -1554,15 +1562,47 @@ class SetupModal(discord.ui.Modal, title="Realm Setup"):
                 command=command_name
             )
             
+            # Process initial keys if provided
+            valid_keys = []
+            if initial_keys:
+                for key in initial_keys:
+                    key = key.strip()
+                    if len(key) == 36:  # UUID length
+                        try:
+                            uuid_obj = uuid.UUID(key, version=4)
+                            if str(uuid_obj) == key.lower():
+                                valid_keys.append(key)
+                        except ValueError:
+                            continue
+
+            # Add valid keys if any
+            if valid_keys:
+                guild_config = interaction.client.config.guilds[guild_id]
+                for key in valid_keys:
+                    hashed = KeySecurity.hash_key(key)
+                    await guild_config.add_key(hashed, guild_id)
+                stats.log_keys_added(guild_id, len(valid_keys))
+                await audit.log_key_add(interaction, len(valid_keys))
+            
             # Save and sync
             await interaction.client.config.save()
             await create_dynamic_command(command_name, guild_id)
             
+            # Build response message
+            response = [
+                "✅ Setup complete!",
+                f"• Role: {role.mention}",
+                f"• Command: /{command_name}"
+            ]
+            if valid_keys:
+                response.append(f"• Added {len(valid_keys)} keys")
+                if len(valid_keys) != len(initial_keys):
+                    response.append(f"• Skipped {len(initial_keys) - len(valid_keys)} invalid keys")
+            else:
+                response.append("• Add keys with /addkey or /addkeys")
+            
             await interaction.response.send_message(
-                f"✅ Setup complete!\n"
-                f"• Role: {role.mention}\n"
-                f"• Command: /{command_name}\n"
-                f"• Add keys with /addkey or /addkeys",
+                "\n".join(response),
                 ephemeral=True
             )
             
@@ -1596,7 +1636,7 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             for key in keys:
                 if len(key) == 36:  # UUID length
                     try:
-                        uuid.UUID(key, version=4)
+                        uuid_obj = uuid.UUID(key, version=4)
                         valid_keys.append(key)
                     except ValueError:
                         continue
