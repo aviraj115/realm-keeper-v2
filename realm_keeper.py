@@ -284,6 +284,7 @@ class RealmBot(commands.AutoShardedBot):
         self.realm_keeper = None
         self.config = Config()
         self.ready = asyncio.Event()
+        self.cleanup = None
     
     async def setup_hook(self):
         """Initialize bot systems"""
@@ -303,6 +304,10 @@ class RealmBot(commands.AutoShardedBot):
             
             # Initialize systems
             await self.config.load()
+            
+            # Start cleanup task
+            self.cleanup = KeyCleanup(self)
+            await self.cleanup.start()
             
         except Exception as e:
             logging.error(f"Setup error: {e}")
@@ -326,11 +331,16 @@ class RealmBot(commands.AutoShardedBot):
     
     async def close(self):
         """Cleanup on shutdown"""
-        if self.session:
-            await self.session.close()
-        if self.connector:
-            await self.connector.close()
-        await super().close()
+        try:
+            if self.cleanup:
+                await self.cleanup.stop()
+            if self.session:
+                await self.session.close()
+            if self.connector:
+                await self.connector.close()
+            await super().close()
+        except Exception as e:
+            logging.error(f"Shutdown error: {e}")
 
 # Add near the top with other globals
 bot = None
@@ -344,10 +354,6 @@ async def main():
         # Initialize bot
         bot = RealmBot()
         
-        # Start cleanup task
-        cleanup = KeyCleanup(bot)
-        await cleanup.start()
-        
         # Start bot
         async with bot:
             await bot.start(TOKEN)
@@ -355,11 +361,6 @@ async def main():
     except Exception as e:
         logging.error(f"Startup error: {str(e)}")
         raise
-    finally:
-        if cleanup:
-            await cleanup.stop()
-        if bot:
-            await bot.close()
 
 # Configuration handling
 class GuildConfig:
