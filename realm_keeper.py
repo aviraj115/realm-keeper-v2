@@ -1359,7 +1359,7 @@ async def before_cleanup():
 class KeySecurity:
     DELIMITER = "||"
     HASH_PREFIX_LENGTH = 7
-    HASH_ROUNDS = 4  # Reduced further for better performance
+    HASH_ROUNDS = 4  # Reduced for better performance
     _salt = None
     _metrics = defaultdict(lambda: {
         'hashes': 0,
@@ -1368,14 +1368,14 @@ class KeySecurity:
         'avg_verify_time': 0.0
     })
     
-    # Cache for recently verified keys
+    # Cache settings
     _verify_cache = {}
     _cache_lock = asyncio.Lock()
-    _max_cache_size = 2000  # Increased cache size
+    _max_cache_size = 2000
     _cache_ttl = 600  # 10 minutes
     
     # Batch verification settings
-    BATCH_SIZE = 10  # Number of parallel verifications
+    BATCH_SIZE = 10
     
     @classmethod
     def _get_salt(cls) -> bytes:
@@ -1399,6 +1399,28 @@ class KeySecurity:
                 logging.error(f"Salt initialization error: {str(e)}")
                 cls._salt = secrets.token_bytes(16)  # Use fallback salt
         return cls._salt
+    
+    @classmethod
+    def hash_key(cls, key: str, expiry_seconds: Optional[int] = None) -> str:
+        """Hash a key with metadata"""
+        try:
+            # Prepare metadata
+            meta = {}
+            if expiry_seconds:
+                meta['exp'] = time.time() + expiry_seconds
+            
+            # Add salt and hash with reduced rounds
+            salted_key = f"{key}{cls._get_salt().hex()}"
+            hash_str = bcrypt_sha256.hash(salted_key, rounds=cls.HASH_ROUNDS)
+            
+            # Add metadata if needed
+            if meta:
+                return f"{hash_str}{cls.DELIMITER}{json.dumps(meta)}"
+            return hash_str
+            
+        except Exception as e:
+            logging.error(f"Hash error: {str(e)}")
+            raise
     
     @classmethod
     def _verify_in_thread(cls, key: str, hash_str: str) -> bool:
@@ -1462,14 +1484,12 @@ class KeySecurity:
             
             # Cache result
             async with cls._cache_lock:
-                # Clean old entries if cache is full
                 if len(cls._verify_cache) >= cls._max_cache_size:
                     now = time.time()
                     cls._verify_cache = {
                         k: v for k, v in cls._verify_cache.items()
                         if now - v[1] <= cls._cache_ttl
                     }
-                
                 cls._verify_cache[cache_key] = (result, time.time())
             
             return (result, full_hash) if result else (False, None)
@@ -1488,6 +1508,8 @@ class KeySecurity:
             batch = verifications[i:i + cls.BATCH_SIZE]
             batch_results = await cls._verify_batch(batch)
             results.extend(batch_results)
+        
+        return results
 
 class KeyCleanup:
     def __init__(self, bot):
