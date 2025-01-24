@@ -52,40 +52,32 @@ class GuildConfig:
         self.quick_lookup = defaultdict(set)
         self.command = command
         self.success_msgs = success_msgs or DEFAULT_SUCCESS_MESSAGES.copy()
-        
-        # Initialize quick lookup with key prefix instead of hash prefix
-        for full_hash in valid_keys:
-            if KeySecurity.DELIMITER in full_hash:
-                hash_part = full_hash.split(KeySecurity.DELIMITER)[0]
-            else:
-                hash_part = full_hash
-            # Store by bcrypt hash prefix for quicker matching
-            self.quick_lookup[hash_part[:7]].add(full_hash)
+        self._rebuild_quick_lookup()
+    
+    def _rebuild_quick_lookup(self):
+        """Rebuild quick lookup cache"""
+        self.quick_lookup.clear()
+        for full_hash in self.main_store:
+            hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
+            self.quick_lookup[hash_part[:KeySecurity.HASH_PREFIX_LENGTH]].add(full_hash)
     
     async def add_key(self, full_hash: str, guild_id: int):
         """Add a key with cache invalidation"""
         self.main_store.add(full_hash)
-        hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
-        self.quick_lookup[hash_part[:7]].add(full_hash)
+        self._rebuild_quick_lookup()
         await key_cache.invalidate(guild_id)
     
     async def remove_key(self, full_hash: str, guild_id: int):
         """Remove a key with cache invalidation"""
         self.main_store.discard(full_hash)
-        hash_part = full_hash.split(KeySecurity.DELIMITER)[0] if KeySecurity.DELIMITER in full_hash else full_hash
-        self.quick_lookup[hash_part[:7]].discard(full_hash)
+        self._rebuild_quick_lookup()
         await key_cache.invalidate(guild_id)
     
     async def bulk_add_keys(self, hashes: Set[str], guild_id: int):
-        """Add multiple keys with single cache update"""
-        for full_hash in hashes:
-            quick_hash = hashlib.sha256(full_hash.encode()).hexdigest()[:8]
-            self.quick_lookup[quick_hash].add(full_hash)
+        """Add multiple keys efficiently"""
         self.main_store.update(hashes)
-        
-        # Invalidate and rewarm cache once
+        self._rebuild_quick_lookup()
         await key_cache.invalidate(guild_id)
-        await key_cache.warm_cache(guild_id, self)
 
 config: Dict[int, GuildConfig] = {}
 
@@ -250,7 +242,7 @@ async def load_config():
             for guild_id, guild_config in config.items():
                 await key_cache.warm_cache(guild_id, guild_config)
                 
-    except FileNotFoundError:
+except FileNotFoundError:
         config = {}
 
 async def create_dynamic_command(command_name: str, guild_id: int):
@@ -311,7 +303,7 @@ async def on_ready():
         try:
             await create_dynamic_command(guild_config.command, guild_id)
             restored += 1
-        except Exception as e:
+    except Exception as e:
             logging.error(f"Failed to restore command for guild {guild_id}: {e}")
     
     logging.info(f"Restored {restored} custom commands")
@@ -493,8 +485,8 @@ class SetupModal(discord.ui.Modal, title="⚙️ Server Configuration"):
                 
             if not interaction.user.guild_permissions.administrator and target_role >= interaction.user.top_role:
                 await progress_msg.edit(content="❌ Your highest role must be above the target role!")
-                return
-            
+            return
+
             await progress_msg.edit(content="📝 Processing configuration...")
             success_msgs = []
             if self.success_message.value:
@@ -547,7 +539,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
         min_length=36,
         max_length=36
     )
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -610,7 +602,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                         claim_time = time.time() - start_time
                         stats.log_claim(guild_id, True, claim_time)
                         await audit.log_claim(interaction, key_value[:8], True)
-                        return
+            return
 
                 # No valid matches found
                 await progress_msg.edit(content="❌ Invalid key or already claimed!")
@@ -621,6 +613,10 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
 
 class KeySecurity:
     DELIMITER = "||"
+    HASH_PREFIX_LENGTH = 7  # Length of bcrypt hash prefix to use for quick lookup
+    
+    def __init__(self):
+        self.worker_pool = ThreadPoolExecutor(max_workers=4)
     
     @staticmethod
     def hash_key(key: str, expiry_seconds: Optional[int] = None, max_uses: Optional[int] = None) -> str:
@@ -635,84 +631,66 @@ class KeySecurity:
             return f"{hash_str}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
         return hash_str
 
-    @staticmethod
-    def verify_key(key: str, full_hash: str) -> tuple[bool, Optional[str]]:
-        """Verify key and return (is_valid, updated_hash)"""
+    async def verify_keys_batch(self, key: str, hashes: Set[str], chunk_size: int = 10) -> tuple[bool, Optional[str]]:
+        """Verify key against multiple hashes in parallel batches"""
+        if not hashes:
+            return False, None
+            
+        # Split hashes into chunks for batch processing
+        hash_chunks = [list(hashes)[i:i + chunk_size] for i in range(0, len(hashes), chunk_size)]
+        
+        for chunk in hash_chunks:
+            # Process chunk in parallel
+            tasks = [
+                asyncio.get_event_loop().run_in_executor(
+                    self.worker_pool,
+                    self.verify_key,
+                    key,
+                    full_hash
+                )
+                for full_hash in chunk
+            ]
+            
+            # Wait for all verifications in chunk
+            results = await asyncio.gather(*tasks)
+            
+            # Check results
+            for i, (is_valid, updated_hash) in enumerate(results):
+                if is_valid:
+                    return True, updated_hash or chunk[i]
+                    
+        return False, None
+
+    def verify_key(self, key: str, full_hash: str) -> tuple[bool, Optional[str]]:
+        """Verify key and handle metadata"""
         try:
-            # Basic format validation
             if KeySecurity.DELIMITER in full_hash:
                 hash_part, meta_part = full_hash.split(KeySecurity.DELIMITER, 1)
                 metadata = json.loads(meta_part)
                 
                 # Check expiry
                 if metadata.get('exp') and metadata['exp'] < time.time():
-                    logging.debug(f"Key expired: {key[:8]}...")
                     return False, None
                 
                 # Verify hash
                 if not bcrypt_sha256.verify(key, hash_part):
-                    logging.debug(f"Hash mismatch: {key[:8]}...")
                     return False, None
                 
                 # Handle uses
                 if 'uses' in metadata:
                     if metadata['uses'] <= 0:
-                        logging.debug(f"No uses left: {key[:8]}...")
                         return False, None
                     metadata['uses'] -= 1
                     if metadata['uses'] > 0:
-                        # Key still has uses left
-                        new_hash = f"{hash_part}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
-                        return True, new_hash
-                    # Key used up
+                        return True, f"{hash_part}{KeySecurity.DELIMITER}{json.dumps(metadata)}"
                     return True, None
                     
                 return True, full_hash
             else:
-                # Simple hash without metadata
                 return bcrypt_sha256.verify(key, full_hash), full_hash
                 
-        except Exception as e:
-            logging.error(f"Key verification error: {str(e)}")
+        except Exception:
             return False, None
-
-    @staticmethod
-    async def verify_key_async(key: str, full_hash: str) -> tuple[bool, Optional[str]]:
-        """Async wrapper for verify_key"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            worker_pool.pool,
-            KeySecurity.verify_key,
-            key,
-            full_hash
-        )
-
-    @staticmethod
-    async def verify_keys_parallel(key: str, hashes: Set[str]) -> tuple[bool, Optional[str]]:
-        """Verify key against multiple hashes in parallel"""
-        if not hashes:
-            return False, None
-            
-        # Create verification tasks
-        tasks = [
-            asyncio.create_task(KeySecurity.verify_key_async(key, full_hash))
-            for full_hash in hashes
-        ]
-        
-        # Wait for first match or all failures
-        for done_task in asyncio.as_completed(tasks):
-            try:
-                is_valid, updated_hash = await done_task
-                if is_valid:
-                    # Cancel remaining tasks
-                    for task in tasks:
-                        if not task.done():
-                            task.cancel()
-                    return True, updated_hash
-            except asyncio.CancelledError:
-                pass
-                
-        return False, None
 
 class AdaptiveWorkerPool:
     def __init__(self, min_workers: int = 4, max_workers: int = 32):
@@ -763,6 +741,15 @@ async def monitor_workers():
 
 class Stats:
     def __init__(self):
+        # Persistent stats (survive restarts)
+        self.persistent_stats = defaultdict(lambda: {
+            'total_keys_added': 0,
+            'total_keys_removed': 0,
+            'total_claims_all_time': 0,
+            'successful_claims_all_time': 0
+        })
+        
+        # Session stats (reset on restart)
         self.guild_stats = defaultdict(lambda: {
             'total_claims': 0,
             'successful_claims': 0,
@@ -773,48 +760,90 @@ class Stats:
             'fastest_claim': float('inf'),
             'slowest_claim': 0.0,
             'last_claim': 0,
-            'session_start': time.time()  # Add this to track stats per session
+            'session_start': time.time()
         })
         self.load_stats()
-    
+
     async def save_stats(self):
-        """Save stats to file"""
+        """Save persistent stats to file"""
         try:
             async with aiofiles.open('stats.json', 'w') as f:
                 await f.write(json.dumps({
-                    str(guild_id): {
-                        k: v for k, v in stats.items()
-                        if k not in ['session_start']  # Don't persist session-specific data
-                    }
-                    for guild_id, stats in self.guild_stats.items()
+                    str(guild_id): stats
+                    for guild_id, stats in self.persistent_stats.items()
                 }, indent=4))
         except Exception as e:
             logging.error(f"Failed to save stats: {str(e)}")
-    
+
     def load_stats(self):
-        """Load stats from file"""
+        """Load persistent stats from file"""
         try:
             with open('stats.json', 'r') as f:
                 data = json.loads(f.read())
                 for guild_id, stats in data.items():
-                    # Reset counters that should be per-session
-                    stats['keys_added'] = 0
-                    stats['keys_removed'] = 0
-                    stats['total_claims'] = 0
-                    stats['successful_claims'] = 0
-                    stats['failed_claims'] = 0
-                    stats['total_claim_time'] = 0.0
-                    stats['fastest_claim'] = float('inf')
-                    stats['slowest_claim'] = 0.0
-                    stats['session_start'] = time.time()
-                    self.guild_stats[int(guild_id)].update(stats)
+                    self.persistent_stats[int(guild_id)].update(stats)
         except FileNotFoundError:
             pass
         except Exception as e:
             logging.error(f"Failed to load stats: {str(e)}")
 
+    def log_claim(self, guild_id: int, success: bool, time_taken: float = None):
+        """Log a claim attempt with timing"""
+        # Update session stats
+        stats = self.guild_stats[guild_id]
+        stats['total_claims'] += 1
+        stats['last_claim'] = time.time()
+        
+        if success:
+            stats['successful_claims'] += 1
+            if time_taken is not None:
+                stats['total_claim_time'] += time_taken
+                stats['fastest_claim'] = min(stats['fastest_claim'], time_taken)
+                stats['slowest_claim'] = max(stats['slowest_claim'], time_taken)
+        else:
+            stats['failed_claims'] += 1
+            
+        # Update persistent stats
+        p_stats = self.persistent_stats[guild_id]
+        p_stats['total_claims_all_time'] += 1
+        if success:
+            p_stats['successful_claims_all_time'] += 1
+
+    def log_keys_added(self, guild_id: int, count: int):
+        """Log keys being added"""
+        self.guild_stats[guild_id]['keys_added'] += count
+        self.persistent_stats[guild_id]['total_keys_added'] += count
+
+    def log_keys_removed(self, guild_id: int, count: int):
+        """Log keys being removed"""
+        self.guild_stats[guild_id]['keys_removed'] += count
+        self.persistent_stats[guild_id]['total_keys_removed'] += count
+
+    def get_stats(self, guild_id: int) -> dict:
+        """Get formatted stats for display"""
+        session = self.guild_stats[guild_id]
+        persistent = self.persistent_stats[guild_id]
+        
+        # Calculate average claim time
+        successful_claims = session['successful_claims']
+        avg_time = session['total_claim_time'] / successful_claims if successful_claims > 0 else 0
+        
+        return {
+            'total_claims': session['total_claims'],
+            'successful_claims': session['successful_claims'],
+            'failed_claims': session['failed_claims'],
+            'keys_added': persistent['total_keys_added'],
+            'keys_removed': persistent['total_keys_removed'],
+            'timing': {
+                'average': f"{avg_time:.2f}s",
+                'fastest': f"{session['fastest_claim']:.2f}s" if session['fastest_claim'] != float('inf') else "N/A",
+                'slowest': f"{session['slowest_claim']:.2f}s" if session['slowest_claim'] > 0 else "N/A"
+            }
+        }
+
     def reset_guild_stats(self, guild_id: int):
-        """Reset stats for a guild"""
+        """Reset both session and persistent stats for a guild"""
+        # Reset session stats
         self.guild_stats[guild_id] = {
             'total_claims': 0,
             'successful_claims': 0,
@@ -827,54 +856,13 @@ class Stats:
             'last_claim': 0,
             'session_start': time.time()
         }
-
-    def log_claim(self, guild_id: int, success: bool, time_taken: float = None):
-        """Log a claim attempt with timing"""
-        stats = self.guild_stats[guild_id]
-        stats['total_claims'] += 1
-        stats['last_claim'] = time.time()
         
-        if success:
-            stats['successful_claims'] += 1
-            if time_taken is not None:
-                stats['total_claim_time'] += time_taken
-                if time_taken < stats['fastest_claim']:
-                    stats['fastest_claim'] = time_taken
-                if time_taken > stats['slowest_claim']:
-                    stats['slowest_claim'] = time_taken
-        else:
-            stats['failed_claims'] += 1
-
-    def log_keys_added(self, guild_id: int, count: int):
-        """Log keys being added"""
-        self.guild_stats[guild_id]['keys_added'] += count
-
-    def log_keys_removed(self, guild_id: int, count: int):
-        """Log keys being removed"""
-        self.guild_stats[guild_id]['keys_removed'] += count
-
-    def get_stats(self, guild_id: int) -> dict:
-        """Get formatted stats for display"""
-        stats = self.guild_stats[guild_id]
-        
-        # Calculate average claim time
-        successful_claims = stats['successful_claims']
-        avg_time = stats['total_claim_time'] / successful_claims if successful_claims > 0 else 0
-        
-        # Format timing stats
-        timing_stats = {
-            'average': f"{avg_time:.2f}s",
-            'fastest': f"{stats['fastest_claim']:.2f}s" if stats['fastest_claim'] != float('inf') else "N/A",
-            'slowest': f"{stats['slowest_claim']:.2f}s" if stats['slowest_claim'] > 0 else "N/A"
-        }
-        
-        return {
-            'total_claims': stats['total_claims'],
-            'successful_claims': stats['successful_claims'],
-            'failed_claims': stats['failed_claims'],
-            'keys_added': stats['keys_added'],
-            'keys_removed': stats['keys_removed'],
-            'timing': timing_stats
+        # Reset persistent stats
+        self.persistent_stats[guild_id] = {
+            'total_keys_added': 0,
+            'total_keys_removed': 0,
+            'total_claims_all_time': 0,
+            'successful_claims_all_time': 0
         }
 
 # Initialize stats
@@ -1028,8 +1016,9 @@ async def clearkeys(interaction: discord.Interaction):
     await key_cache.invalidate(guild_id)
     await save_config()
     
-    # Reset stats when clearing keys
+    # Reset stats and save them
     stats.reset_guild_stats(guild_id)
+    await stats.save_stats()
     
     await interaction.response.send_message(
         f"✅ Cleared {key_count} keys!",
@@ -1065,7 +1054,7 @@ async def removekey(interaction: discord.Interaction, key: str):
 
     if removed:
         await save_config()
-        await interaction.response.send_message("✅ Key removed!", ephemeral=True)
+    await interaction.response.send_message("✅ Key removed!", ephemeral=True)
     else:
         await interaction.response.send_message("❌ Key not found!", ephemeral=True)
 
@@ -1143,7 +1132,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
             guild_id = interaction.guild.id
             if (guild_config := config.get(guild_id)) is None:
                 await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
-                return
+            return
 
             # Validate all keys first
             key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
@@ -1157,7 +1146,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                         f"❌ Invalid UUID format: {key[:8]}...",
                         ephemeral=True
                     )
-                    return
+            return
 
             # Remove valid keys
             removed = 0
@@ -1173,13 +1162,13 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                 f"✅ Removed {removed} keys!\n• Not found: {len(key_list)-removed}",
                 ephemeral=True
             )
-                
+
         except Exception as e:
             logging.error(f"Key removal error: {str(e)}")
-            await interaction.response.send_message(
+        await interaction.response.send_message(
                 "❌ Failed to remove keys!",
-                ephemeral=True
-            )
+            ephemeral=True
+        )
 
 @bot.tree.command(name="metrics", description="📊 View detailed performance metrics (Admin only)")
 @app_commands.default_permissions(administrator=True)
