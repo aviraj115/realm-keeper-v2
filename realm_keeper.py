@@ -912,7 +912,7 @@ class RealmKeeper(commands.Cog):
     async def addkey(self, interaction: discord.Interaction, key: str):
         """Add a single key"""
         guild_id = interaction.guild.id
-        if (guild_config := config.get(guild_id)) is None:
+        if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
 
@@ -931,7 +931,7 @@ class RealmKeeper(commands.Cog):
 
         hashed = KeySecurity.hash_key(key, expiry_seconds)
         await guild_config.add_key(hashed, guild_id)
-        await save_config()
+        await interaction.client.config.save()
         stats.log_keys_added(guild_id, 1)
         await audit.log_key_add(interaction, 1)
         
@@ -953,7 +953,7 @@ class RealmKeeper(commands.Cog):
     async def removekey(self, interaction: discord.Interaction, key: str):
         """Remove a single key"""
         guild_id = interaction.guild.id
-        if (guild_config := config.get(guild_id)) is None:
+        if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
 
@@ -975,7 +975,7 @@ class RealmKeeper(commands.Cog):
                 break
 
         if removed:
-            await save_config()
+            await interaction.client.config.save()
             await interaction.response.send_message("✅ Key removed!", ephemeral=True)
         else:
             await interaction.response.send_message("❌ Key not found!", ephemeral=True)
@@ -993,14 +993,14 @@ class RealmKeeper(commands.Cog):
     async def clearkeys(self, interaction: discord.Interaction):
         """Remove all keys"""
         guild_id = interaction.guild.id
-        if (guild_config := config.get(guild_id)) is None:
+        if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
 
         key_count = len(guild_config.main_store)
         guild_config.main_store.clear()
         await key_cache.invalidate(guild_id)
-        await save_config()
+        await interaction.client.config.save()
         
         # Reset stats and save them
         stats.reset_guild_stats(guild_id)
@@ -1017,7 +1017,7 @@ class RealmKeeper(commands.Cog):
     async def keys(self, interaction: discord.Interaction):
         """View key statistics"""
         guild_id = interaction.guild.id
-        if (guild_config := config.get(guild_id)) is None:
+        if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
         
@@ -1109,7 +1109,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             guild_id = interaction.guild.id
-            if (guild_config := config.get(guild_id)) is None:
+            if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
                 await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
                 return
 
@@ -1136,7 +1136,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                         removed += 1
                         break
 
-            await save_config()
+            await interaction.client.config.save()
             await interaction.response.send_message(
                 f"✅ Removed {removed} keys!\n• Not found: {len(key_list)-removed}",
                 ephemeral=True
