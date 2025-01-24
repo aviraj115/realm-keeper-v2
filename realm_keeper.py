@@ -190,11 +190,57 @@ class RealmBot(commands.AutoShardedBot):
             await self.connector.close()
         await super().close()
 
+# Add near the top with other globals (after imports)
+bot = None
+config = {}
+
+# Add cleanup task definition before other tasks
+@tasks.loop(hours=1)
+async def cleanup_task():
+    """Cleanup expired keys periodically"""
+    try:
+        logging.info("Starting scheduled key cleanup")
+        for guild_id, guild_config in bot.config.guilds.items():
+            expired = set()
+            invalid = set()
+            
+            # Check each key
+            for full_hash in guild_config.main_store:
+                if KeySecurity.DELIMITER in full_hash:
+                    try:
+                        _, meta = full_hash.split(KeySecurity.DELIMITER, 1)
+                        meta_data = json.loads(meta)
+                        
+                        # Check expiration
+                        if meta_data.get('exp', float('inf')) < time.time():
+                            expired.add(full_hash)
+                            
+                    except json.JSONDecodeError:
+                        invalid.add(full_hash)
+            
+            # Remove expired and invalid keys
+            if expired or invalid:
+                guild_config.main_store -= (expired | invalid)
+                await bot.key_cache.invalidate(guild_id)
+                
+    except Exception as e:
+        logging.error(f"Cleanup error: {str(e)}")
+
+# Add main function at the bottom (before if __name__ == "__main__")
 async def main():
     """Main entry point"""
+    global bot, config
     try:
-        async with RealmBot() as bot:
+        # Initialize bot
+        bot = RealmBot()
+        
+        # Load config
+        config = bot.config.guilds
+        
+        # Start bot
+        async with bot:
             await bot.start(TOKEN)
+            
     except Exception as e:
         logging.error(f"Startup error: {str(e)}")
         raise
@@ -1047,408 +1093,6 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                 "❌ Failed to remove keys!",
             ephemeral=True
         )
-
-@tasks.loop(hours=1)
-async def cleanup_task():
-    """Cleanup expired keys periodically"""
-    try:
-        logging.info("Starting scheduled key cleanup")
-        for guild_id, guild_config in config.items():
-            expired = set()
-            invalid = set()
-            
-            # Check each key
-            for full_hash in guild_config.main_store:
-                if KeySecurity.DELIMITER in full_hash:
-                    try:
-                        _, meta = full_hash.split(KeySecurity.DELIMITER, 1)
-                        meta_data = json.loads(meta)
-                        
-                        # Check expiration
-                        if meta_data.get('exp', float('inf')) < time.time():
-                            expired.add(full_hash)
-                            continue
-                            
-                        # Check uses
-                        if meta_data.get('uses', 1) <= 0:
-                            expired.add(full_hash)
-                            continue
-                            
-                    except json.JSONDecodeError:
-                        invalid.add(full_hash)
-            
-            # Remove expired and invalid keys
-            if expired or invalid:
-                guild_config.main_store -= (expired | invalid)
-                await key_cache.invalidate(guild_id)
-                
-                logging.info(
-                    f"Guild {guild_id} cleanup:\n"
-                    f"• Expired: {len(expired)}\n"
-                    f"• Invalid: {len(invalid)}\n"
-                    f"• Remaining: {len(guild_config.main_store)}"
-                )
-        
-        # Save changes
-        await save_config()
-        
-    except Exception as e:
-        logging.error(f"Cleanup error: {str(e)}")
-
-@cleanup_task.before_loop
-async def before_cleanup():
-    """Wait for bot to be ready before starting cleanup"""
-    await bot.wait_until_ready()
-
-class KeySecurity:
-    DELIMITER = "||"
-    HASH_PREFIX_LENGTH = 7
-    HASH_ROUNDS = 10
-    
-    def __init__(self):
-        self.salt = self._load_or_generate_salt()
-        self.worker_pool = ThreadPoolExecutor(
-            max_workers=max(8, os.cpu_count() * 2),
-            thread_name_prefix="key-verify"
-        )
-        self.metrics = defaultdict(lambda: {
-            'hashes': 0,
-            'verifications': 0,
-            'failures': 0,
-            'avg_verify_time': 0.0
-        })
-    
-    def _load_or_generate_salt(self) -> bytes:
-        """Load or generate salt with proper error handling"""
-        try:
-            # Try to load from environment
-            if salt := os.getenv('HASH_SALT'):
-                return base64.b64decode(salt)
-            
-            # Generate new salt
-            new_salt = secrets.token_bytes(16)
-            encoded = base64.b64encode(new_salt).decode()
-            
-            # Save to .env file
-            with open('.env', 'a') as f:
-                f.write(f"\nHASH_SALT={encoded}")
-            
-            logging.warning("Generated new HASH_SALT")
-            return new_salt
-            
-        except Exception as e:
-            logging.error(f"Salt initialization error: {str(e)}")
-            # Use fallback salt in emergency
-            return secrets.token_bytes(16)
-    
-    def hash_key(self, key: str, expiry_seconds: Optional[int] = None) -> str:
-        """Hash a key with metadata"""
-        try:
-            # Prepare metadata
-            meta = {}
-            if expiry_seconds:
-                meta['exp'] = time.time() + expiry_seconds
-            
-            # Add salt and hash
-            salted_key = f"{key}{self.salt.hex()}"
-            hash_str = bcrypt_sha256.using(rounds=self.HASH_ROUNDS).hash(salted_key)
-            
-            # Add metadata if needed
-            if meta:
-                return f"{hash_str}{self.DELIMITER}{json.dumps(meta)}"
-            return hash_str
-            
-        except Exception as e:
-            logging.error(f"Hash error: {str(e)}")
-            raise
-
-class KeyCleanup:
-    def __init__(self, bot):
-        self.bot = bot
-        self.cleanup_task = None
-        self.stats = defaultdict(lambda: {
-            'expired': 0,
-            'invalid': 0,
-            'last_run': 0,
-            'duration': 0
-        })
-        self._lock = asyncio.Lock()
-    
-    async def start(self):
-        """Start cleanup task"""
-        if not self.cleanup_task:
-            self.cleanup_task = self.bot.loop.create_task(self._cleanup_loop())
-            logging.info("Started key cleanup task")
-    
-    async def stop(self):
-        """Stop cleanup task"""
-        if self.cleanup_task:
-            self.cleanup_task.cancel()
-            try:
-                await self.cleanup_task
-            except asyncio.CancelledError:
-                pass
-            self.cleanup_task = None
-    
-    async def _cleanup_loop(self):
-        """Main cleanup loop"""
-        while True:
-            try:
-                await self._cleanup_expired_keys()
-                await asyncio.sleep(3600)  # Run every hour
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logging.error(f"Cleanup error: {str(e)}")
-                await asyncio.sleep(300)  # Retry after 5 minutes on error
-    
-    async def _cleanup_expired_keys(self):
-        """Clean expired and invalid keys"""
-        start_time = time.time()
-        logging.info("Starting key cleanup")
-        
-        async with self._lock:
-            for guild_id, guild_config in self.bot.config.guilds.items():
-                expired = set()
-                invalid = set()
-                
-                # Check each key
-                for full_hash in guild_config.main_store:
-                    if KeySecurity.DELIMITER in full_hash:
-                        try:
-                            hash_part, meta = full_hash.split(KeySecurity.DELIMITER, 1)
-                            meta_data = json.loads(meta)
-                            
-                            # Check expiration
-                            if meta_data.get('exp', float('inf')) < time.time():
-                                expired.add(full_hash)
-                                continue
-                                
-                            # Check uses
-                            if meta_data.get('uses', 1) <= 0:
-                                expired.add(full_hash)
-                                continue
-                                
-                        except (json.JSONDecodeError, ValueError):
-                            invalid.add(full_hash)
-                
-                # Remove expired and invalid keys
-                if expired or invalid:
-                    guild_config.main_store -= (expired | invalid)
-                    guild_config._rebuild_bloom()  # Update Bloom filter
-                    await key_cache.invalidate(guild_id)
-                    
-                    # Update stats
-                    self.stats[guild_id]['expired'] += len(expired)
-                    self.stats[guild_id]['invalid'] += len(invalid)
-                    self.stats[guild_id]['last_run'] = time.time()
-                    
-                    logging.info(
-                        f"Guild {guild_id} cleanup:\n"
-                        f"• Expired: {len(expired)}\n"
-                        f"• Invalid: {len(invalid)}\n"
-                        f"• Remaining: {len(guild_config.main_store)}"
-                    )
-            
-            # Save changes
-            await self.bot.config.save()
-        
-        # Update duration stat
-        duration = time.time() - start_time
-        for stats in self.stats.values():
-            stats['duration'] = duration
-        
-        logging.info(f"Cleanup completed in {duration:.2f}s")
-    
-    def get_stats(self, guild_id: int) -> dict:
-        """Get cleanup stats for a guild"""
-        return self.stats[guild_id]
-
-class KeyLocks:
-    def __init__(self, shards: int = 64):
-        """Initialize lock manager with sharding"""
-        self.shards = shards
-        self.locks = defaultdict(lambda: {
-            shard: asyncio.Lock() for shard in range(shards)
-        })
-        self.global_locks = defaultdict(asyncio.Lock)
-        self._cleanup_task = None
-        self._active_locks = defaultdict(int)
-    
-    def get_shard(self, key: str) -> int:
-        """Get shard for a key"""
-        return mmh3.hash(key.encode(), signed=False) % self.shards
-    
-    async def acquire(self, guild_id: int, key: str) -> bool:
-        """Acquire lock for key verification"""
-        try:
-            shard = self.get_shard(key)
-            self._active_locks[guild_id] += 1
-            await self.locks[guild_id][shard].acquire()
-            return True
-        except Exception as e:
-            logging.error(f"Lock acquisition failed: {str(e)}")
-            return False
-    
-    async def release(self, guild_id: int, key: str):
-        """Release lock after verification"""
-        try:
-            shard = self.get_shard(key)
-            self.locks[guild_id][shard].release()
-            self._active_locks[guild_id] -= 1
-        except Exception as e:
-            logging.error(f"Lock release failed: {str(e)}")
-    
-    async def acquire_global(self, guild_id: int) -> bool:
-        """Acquire global lock for guild operations"""
-        try:
-            await self.global_locks[guild_id].acquire()
-            return True
-        except Exception as e:
-            logging.error(f"Global lock acquisition failed: {str(e)}")
-            return False
-    
-    async def release_global(self, guild_id: int):
-        """Release global lock"""
-        try:
-            self.global_locks[guild_id].release()
-        except Exception as e:
-            logging.error(f"Global lock release failed: {str(e)}")
-    
-    def get_metrics(self, guild_id: int) -> dict:
-        """Get lock metrics for a guild"""
-        return {
-            'active_locks': self._active_locks[guild_id],
-            'shard_count': self.shards,
-            'global_locked': self.global_locks[guild_id].locked()
-        }
-
-# Initialize lock manager
-key_locks = KeyLocks()
-
-class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            # Validate key format first
-            is_valid, error = await self.bot.key_validator.validate_key(
-                self.key.value.strip(),
-                interaction.guild_id
-            )
-            
-            if not is_valid:
-                await interaction.response.send_message(
-                    f"❌ {error}",
-                    ephemeral=True
-                )
-                return
-                
-            # Continue with key verification...
-            
-            # Acquire lock for key verification
-            if not await key_locks.acquire(guild_id, key_value):
-                await progress_msg.edit(content="❌ System busy, please try again!")
-                return
-                
-            try:
-                # Verify key
-                is_valid, updated_hash = await key_security.verify_keys_batch(
-                    key_value, 
-                    possible_hashes,
-                    chunk_size=20
-                )
-                
-                if is_valid:
-                    # Update key storage under lock
-                    for full_hash in possible_hashes:
-                        if await key_security.verify_key(key_value, full_hash)[0]:
-                            await guild_config.remove_key(full_hash, guild_id)
-                            if updated_hash:
-                                await guild_config.add_key(updated_hash, guild_id)
-                            break
-                    
-                    await save_config()
-                    
-                    # Grant role and send success message
-                    role = interaction.guild.get_role(guild_config.role_id)
-                    await interaction.user.add_roles(role)
-                    
-                    success_msg = random.choice(guild_config.success_msgs)
-                    await progress_msg.edit(content=success_msg.format(
-                        user=interaction.user.mention,
-                        role=role.mention
-                    ))
-                else:
-                    await progress_msg.edit(content="❌ Invalid key!")
-                    
-            finally:
-                # Always release lock
-                await key_locks.release(guild_id, key_value)
-                
-        except Exception as e:
-            logging.error(f"Claim error: {str(e)}")
-            await progress_msg.edit(content="❌ An error occurred!")
-
-class KeyValidator:
-    def __init__(self, bot):
-        self.bot = bot
-        self.worker_pool = ThreadPoolExecutor(max_workers=4)
-        self.validation_stats = defaultdict(lambda: {
-            'total': 0,
-            'valid': 0,
-            'invalid': 0,
-            'errors': 0
-        })
-    
-    async def validate_key(self, key: str, guild_id: int) -> tuple[bool, Optional[str]]:
-        """Validate key format and update stats"""
-        try:
-            self.validation_stats[guild_id]['total'] += 1
-            
-            # Basic format check
-            if not isinstance(key, str) or not key:
-                self.validation_stats[guild_id]['invalid'] += 1
-                return False, "Key must be a non-empty string"
-            
-            # Length check
-            if len(key) != 36:  # Standard UUID length
-                self.validation_stats[guild_id]['invalid'] += 1
-                return False, "Invalid key length"
-            
-            # Async UUID validation
-            try:
-                is_valid = await self.bot.loop.run_in_executor(
-                    self.worker_pool,
-                    self._validate_uuid,
-                    key
-                )
-                
-                if is_valid:
-                    self.validation_stats[guild_id]['valid'] += 1
-                    return True, None
-                else:
-                    self.validation_stats[guild_id]['invalid'] += 1
-                    return False, "Invalid key format"
-                    
-            except Exception as e:
-                self.validation_stats[guild_id]['errors'] += 1
-                logging.error(f"UUID validation error: {str(e)}")
-                return False, "Validation error"
-                
-        except Exception as e:
-            self.validation_stats[guild_id]['errors'] += 1
-            logging.error(f"Key validation error: {str(e)}")
-            return False, "Internal error"
-    
-    def _validate_uuid(self, key: str) -> bool:
-        """Synchronous UUID validation"""
-        try:
-            return str(uuid.UUID(key, version=4)) == key.lower()
-        except ValueError:
-            return False
-    
-    def get_stats(self, guild_id: int) -> dict:
-        """Get validation stats for a guild"""
-        return self.validation_stats[guild_id]
 
 @tasks.loop(minutes=5)
 async def save_stats_task():
