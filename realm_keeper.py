@@ -92,9 +92,32 @@ class Stats:
                 'average': 0,
                 'fastest': float('inf'),
                 'slowest': 0
-            }
+            },
+            'cooldowns': {}  # {user_id: expiry_time}
         })
         self._lock = asyncio.Lock()
+    
+    def is_on_cooldown(self, guild_id: int, user_id: int) -> bool:
+        """Check if a user is on cooldown"""
+        cooldowns = self.stats[guild_id]['cooldowns']
+        now = time.time()
+        
+        # Clean expired cooldowns
+        expired = [uid for uid, expiry in cooldowns.items() if expiry <= now]
+        for uid in expired:
+            del cooldowns[uid]
+            
+        return user_id in cooldowns
+    
+    def set_cooldown(self, guild_id: int, user_id: int, duration: int):
+        """Set cooldown for a user"""
+        self.stats[guild_id]['cooldowns'][user_id] = time.time() + duration
+    
+    def remove_cooldown(self, guild_id: int, user_id: int):
+        """Remove cooldown for a user"""
+        cooldowns = self.stats[guild_id]['cooldowns']
+        if user_id in cooldowns:
+            del cooldowns[user_id]
     
     def log_keys_added(self, guild_id: int, count: int):
         """Log key additions"""
@@ -1583,12 +1606,16 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
 
             # Check cooldown
             user_id = interaction.user.id
-            if stats.is_on_cooldown(guild_id, user_id):
-                await interaction.followup.send(
-                    "❌ You're on cooldown! Try again later.", 
-                    ephemeral=True
-                )
-                return
+            if not interaction.user.guild_permissions.administrator:
+                retry_after = claim_cooldown.get_retry_after(interaction)
+                if retry_after:
+                    minutes = int(retry_after / 60)
+                    seconds = int(retry_after % 60)
+                    await interaction.followup.send(
+                        f"⏳ Please wait {minutes}m {seconds}s before trying again!",
+                        ephemeral=True
+                    )
+                    return
 
             # Validate key format
             key_value = self.key.value.strip()
@@ -1640,8 +1667,8 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
                         return
                     
                     # Log success
-                    stats.log_claim(guild_id, user_id)
-                    await audit.log_claim(interaction)
+                    stats.log_claim(guild_id, True)
+                    await audit.log_claim(interaction, True)
                     
                     # Send success message
                     success_msg = random.choice(guild_config.success_msgs)
@@ -1655,7 +1682,8 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
                     return
 
             if not key_found:
-                stats.log_failed_claim(guild_id, user_id)
+                stats.log_claim(guild_id, False)
+                await audit.log_claim(interaction, False)
                 await interaction.followup.send(
                     "❌ Invalid key!", 
                     ephemeral=True
