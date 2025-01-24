@@ -30,6 +30,7 @@ import secrets
 import psutil
 import aiofiles
 import sys
+import aiohttp
 
 # Initialize logging
 logging.basicConfig(
@@ -125,6 +126,7 @@ class RealmBot(commands.AutoShardedBot):
         )
         
         # Initialize components
+        self.session = None  # Will be set in setup_hook
         self.connector = None
         self.realm_keeper = None
         self.config = Config()
@@ -134,34 +136,45 @@ class RealmBot(commands.AutoShardedBot):
     
     async def setup_hook(self):
         """Initialize bot systems"""
-        await self.config.load()
-        await self.key_cleanup.start()
-        await self.command_sync.sync_all()
-        
-        # Create connector in async context
-        self.connector = TCPConnector(
-            limit=MAX_CONNECTIONS,
-            ttl_dns_cache=300,
-            force_close=False,
-            enable_cleanup_closed=True
-        )
-        self.http._HTTPClient__session._connector = self.connector
-        
-        # Add realm keeper cog
-        self.realm_keeper = RealmKeeper(self)
-        await self.add_cog(self.realm_keeper)
+        try:
+            # Create session and connector
+            self.connector = TCPConnector(
+                limit=MAX_CONNECTIONS,
+                ttl_dns_cache=300,
+                force_close=False,
+                enable_cleanup_closed=True
+            )
+            self.session = aiohttp.ClientSession(connector=self.connector)
+            
+            # Initialize systems
+            await self.config.load()
+            await self.key_cleanup.start()
+            await self.command_sync.sync_all()
+            
+            # Add realm keeper cog
+            self.realm_keeper = RealmKeeper(self)
+            await self.add_cog(self.realm_keeper)
+            
+        except Exception as e:
+            logging.error(f"Setup error: {str(e)}")
+            raise
     
     async def close(self):
         """Cleanup on shutdown"""
-        await self.key_cleanup.stop()
+        if self.session:
+            await self.session.close()
         if self.connector:
             await self.connector.close()
         await super().close()
 
 async def main():
     """Main entry point"""
-    async with RealmBot() as bot:
-        await bot.start(TOKEN)
+    try:
+        async with RealmBot() as bot:
+            await bot.start(TOKEN)
+    except Exception as e:
+        logging.error(f"Startup error: {str(e)}")
+        raise
 
 # Configuration handling
 class GuildConfig:
@@ -613,127 +626,14 @@ async def create_dynamic_command(command_name: str, guild_id: int):
 class CommandSync:
     def __init__(self, bot):
         self.bot = bot
-        self.sync_lock = asyncio.Lock()
-        self.last_sync = defaultdict(float)
-        self.sync_stats = defaultdict(lambda: {
-            'success': 0,
-            'failures': 0,
-            'rate_limits': 0,
-            'last_error': None
-        })
         
-        # Rate limit settings
-        self.GUILD_BATCH_SIZE = 5
-        self.BATCH_DELAY = 1.0
-        self.MAX_RETRIES = 3
-        self.BASE_RETRY_DELAY = 2.0
-    
     async def sync_all(self):
-        """Sync commands to all guilds with rate limiting"""
-        async with self.sync_lock:
-            try:
-                # Sync global commands first
-                global_commands = await self.bot.tree.sync()
-                logging.info(f"Synced {len(global_commands)} global commands")
-                
-                # Group guilds into batches
-                guilds = list(self.bot.guilds)
-                batches = [
-                    guilds[i:i + self.GUILD_BATCH_SIZE] 
-                    for i in range(0, len(guilds), self.GUILD_BATCH_SIZE)
-                ]
-                
-                # Process batches with rate limiting
-                for batch in batches:
-                    tasks = [
-                        self._sync_guild(guild) 
-                        for guild in batch
-                    ]
-                    
-                    # Wait for batch to complete
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    
-                    # Handle results
-                    for guild, result in zip(batch, results):
-                        if isinstance(result, Exception):
-                            self.sync_stats[guild.id]['failures'] += 1
-                            self.sync_stats[guild.id]['last_error'] = str(result)
-                            logging.error(f"Sync failed for {guild.name}: {result}")
-                        else:
-                            self.sync_stats[guild.id]['success'] += 1
-                    
-                    # Rate limit delay between batches
-                    await asyncio.sleep(self.BATCH_DELAY)
-                
-                # Log completion
-                total_guilds = len(guilds)
-                success = sum(s['success'] for s in self.sync_stats.values())
-                logging.info(
-                    f"Command sync complete:\n"
-                    f"• Total guilds: {total_guilds}\n"
-                    f"• Successful: {success}\n"
-                    f"• Failed: {total_guilds - success}"
-                )
-                
-            except Exception as e:
-                logging.error(f"Critical sync error: {str(e)}")
-                raise
-    
-    async def _sync_guild(self, guild: discord.Guild) -> None:
-        """Sync commands to a single guild with retries"""
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                # Check rate limit cooldown
-                if time.time() - self.last_sync[guild.id] < self.BATCH_DELAY:
-                    await asyncio.sleep(self.BATCH_DELAY)
-                
-                # Copy and sync commands
-                self.bot.tree.copy_global_to(guild=guild)
-                await self.bot.tree.sync(guild=guild)
-                
-                # Update timestamp
-                self.last_sync[guild.id] = time.time()
-                logging.info(f"Synced commands with {guild.name}")
-                return
-                
-            except discord.HTTPException as e:
-                if e.status == 429:  # Rate limited
-                    self.sync_stats[guild.id]['rate_limits'] += 1
-                    retry_after = e.retry_after or self.BASE_RETRY_DELAY * (attempt + 1)
-                    logging.warning(f"Rate limited for {guild.name}, retry in {retry_after}s")
-                    await asyncio.sleep(retry_after)
-                    continue
-                raise
-            
-            except Exception as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_RETRY_DELAY * (attempt + 1)
-                    logging.warning(f"Sync attempt {attempt + 1} failed for {guild.name}, retry in {delay}s")
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-    
-    def get_stats(self, guild_id: int) -> dict:
-        """Get sync stats for a guild"""
-        return self.sync_stats[guild_id]
-
-def admin_cooldown():
-    """Custom cooldown for admin commands"""
-    async def predicate(interaction: discord.Interaction):
-        if interaction.user.guild_permissions.administrator:
-            return True
-        if not hasattr(interaction.command, '_buckets'):
-            interaction.command._buckets = commands.CooldownMapping.from_cooldown(
-                1, 300, commands.BucketType.user
-            )
-        bucket = interaction.command._buckets.get_bucket(interaction)
-        retry_after = bucket.update_rate_limit()
-        if retry_after:
-            raise commands.CommandOnCooldown(
-                bucket, retry_after, commands.BucketType.user
-            )
-        return True
-    return app_commands.check(predicate)
+        """Sync commands to all guilds"""
+        try:
+            await self.bot.tree.sync()
+            logging.info("Synced commands globally")
+        except Exception as e:
+            logging.error(f"Command sync error: {str(e)}")
 
 class RealmKeeper(commands.Cog):
     def __init__(self, bot):
