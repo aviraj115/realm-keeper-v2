@@ -1559,68 +1559,89 @@ class KeyLocks:
 # Initialize lock manager
 key_locks = KeyLocks()
 
-class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
-    def __init__(self):
-        super().__init__()
-        self.add_item(discord.ui.TextInput(
-            label="Enter your key",
-            placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
-            min_length=36,
-            max_length=36,
-            required=True
-        ))
-    
+class ArcaneGatewayModal(discord.ui.Modal, title="Key Verification"):
+    key = discord.ui.TextInput(
+        label="Enter your key",
+        placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx",
+        min_length=36,
+        max_length=36,
+        required=True
+    )
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             # Defer response to prevent timeout
             await interaction.response.defer(ephemeral=True)
             
-            # Get key and validate format
-            key_value = self.children[0].value.strip()
-            
-            # Get guild config
             guild_id = interaction.guild.id
-            guild_config = interaction.client.config.guilds.get(guild_id)
-            if not guild_config:
-                await interaction.followup.send("❌ Server not setup! Use /setup first", ephemeral=True)
+            if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
+                await interaction.followup.send(
+                    "❌ This server is not setup!", 
+                    ephemeral=True
+                )
                 return
-            
-            # Validate UUID format
+
+            # Check cooldown
+            user_id = interaction.user.id
+            if stats.is_on_cooldown(guild_id, user_id):
+                await interaction.followup.send(
+                    "❌ You're on cooldown! Try again later.", 
+                    ephemeral=True
+                )
+                return
+
+            # Validate key format
+            key_value = self.key.value.strip()
             try:
                 uuid_obj = uuid.UUID(key_value, version=4)
                 if str(uuid_obj) != key_value.lower():
                     raise ValueError()
             except ValueError:
-                await interaction.followup.send("❌ Invalid key format!", ephemeral=True)
-                return
-            
-            # Check cooldown
-            if retry_after := claim_cooldown.get_retry_after(interaction):
-                minutes = int(retry_after / 60)
-                seconds = int(retry_after % 60)
                 await interaction.followup.send(
-                    f"⏳ Please wait {minutes}m {seconds}s before trying again!",
+                    "❌ Invalid key format!", 
                     ephemeral=True
                 )
                 return
-            
-            # Verify key
-            for full_hash in guild_config.main_store:
-                is_valid, updated_hash = KeySecurity.verify_key(key_value, full_hash)
-                if is_valid:
-                    # Remove used key
+
+            # Check if key exists and is valid
+            key_found = False
+            for full_hash in list(guild_config.main_store):
+                valid, _ = KeySecurity.verify_key(key_value, full_hash)
+                if valid:
+                    key_found = True
+                    # Remove key and grant role
                     await guild_config.remove_key(full_hash, guild_id)
-                    
-                    # Grant role
-                    role = interaction.guild.get_role(guild_config.role_id)
-                    await interaction.user.add_roles(role)
-                    
-                    # Save changes
                     await interaction.client.config.save()
                     
+                    # Get role
+                    role = interaction.guild.get_role(guild_config.role_id)
+                    if not role:
+                        await interaction.followup.send(
+                            "❌ Role not found! Please contact an admin.", 
+                            ephemeral=True
+                        )
+                        return
+                    
+                    # Add role
+                    try:
+                        await interaction.user.add_roles(role)
+                    except discord.Forbidden:
+                        await interaction.followup.send(
+                            "❌ I don't have permission to give you that role!", 
+                            ephemeral=True
+                        )
+                        return
+                    except Exception as e:
+                        logging.error(f"Role grant error: {str(e)}")
+                        await interaction.followup.send(
+                            "❌ Failed to give you the role!", 
+                            ephemeral=True
+                        )
+                        return
+                    
                     # Log success
-                    stats.log_claim(guild_id, True)
-                    await audit.log_claim(interaction, True)
+                    stats.log_claim(guild_id, user_id)
+                    await audit.log_claim(interaction)
                     
                     # Send success message
                     success_msg = random.choice(guild_config.success_msgs)
@@ -1632,16 +1653,21 @@ class ArcaneGatewayModal(discord.ui.Modal, title="Enter Mystical Key"):
                         ephemeral=True
                     )
                     return
-            
-            # Key not found
-            stats.log_claim(guild_id, False)
-            await audit.log_claim(interaction, False)
-            await interaction.followup.send("❌ Invalid key!", ephemeral=True)
-            
+
+            if not key_found:
+                stats.log_failed_claim(guild_id, user_id)
+                await interaction.followup.send(
+                    "❌ Invalid key!", 
+                    ephemeral=True
+                )
+
         except Exception as e:
             logging.error(f"Claim error: {str(e)}")
             try:
-                await interaction.followup.send("❌ An error occurred!", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ Failed to process your key!", 
+                    ephemeral=True
+                )
             except:
                 pass
 
@@ -1729,18 +1755,16 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
         required=True,
         max_length=2000
     )
-    
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             # Defer response to prevent timeout
             await interaction.response.defer(ephemeral=True)
             
-            # Get guild config
             guild_id = interaction.guild.id
-            guild_config = interaction.client.config.guilds.get(guild_id)
-            if not guild_config:
+            if (guild_config := interaction.client.config.guilds.get(guild_id)) is None:
                 await interaction.followup.send(
-                    "❌ Server not setup! Use /setup first", 
+                    "❌ Run /setup first!", 
                     ephemeral=True
                 )
                 return
@@ -1749,39 +1773,28 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
             key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
             if not key_list:
                 await interaction.followup.send(
-                    "❌ No valid keys found!", 
+                    "❌ No keys provided!", 
                     ephemeral=True
                 )
                 return
 
-            # Validate format and uniqueness
-            valid_keys = []
+            # Validate key format
             invalid_format = []
-            duplicates = []
-
+            valid_keys = []
             for key in key_list:
                 try:
-                    # Check UUID format
                     uuid_obj = uuid.UUID(key, version=4)
                     if str(uuid_obj) != key.lower():
                         invalid_format.append(key)
-                        continue
-                    
-                    # Check if key already exists
-                    if any(KeySecurity.verify_key(key, h)[0] for h in guild_config.main_store):
-                        duplicates.append(key)
-                        continue
-                    
-                    valid_keys.append(key)
+                    else:
+                        valid_keys.append(key)
                 except ValueError:
                     invalid_format.append(key)
 
             if not valid_keys:
-                msg = ["❌ No valid keys to add!"]
+                msg = ["❌ No valid keys found!"]
                 if invalid_format:
                     msg.append(f"• Invalid format: {len(invalid_format)}")
-                if duplicates:
-                    msg.append(f"• Duplicates: {len(duplicates)}")
                 await interaction.followup.send(
                     "\n".join(msg),
                     ephemeral=True
@@ -1789,33 +1802,44 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 return
 
             # Add valid keys
-            hashed_keys = set()
+            added = 0
+            duplicates = []
             for key in valid_keys:
-                hashed = KeySecurity.hash_key(key)
-                hashed_keys.add(hashed)
-            
-            await guild_config.bulk_add_keys(hashed_keys, guild_id)
+                # Check if key already exists
+                exists = False
+                for full_hash in list(guild_config.main_store):
+                    if KeySecurity.verify_key(key, full_hash)[0]:
+                        duplicates.append(key)
+                        exists = True
+                        break
+                
+                if not exists:
+                    # Add new key
+                    full_hash = KeySecurity.hash_key(key)
+                    await guild_config.add_key(full_hash, guild_id)
+                    added += 1
+
             await interaction.client.config.save()
-            stats.log_keys_added(guild_id, len(valid_keys))
-            await audit.log_key_add(interaction, len(valid_keys))
+            stats.log_keys_added(guild_id, added)
+            await audit.log_key_add(interaction, added)
             
             # Build response message
-            msg = [f"✅ Added {len(valid_keys)} keys!"]
-            if invalid_format:
-                msg.append(f"• Invalid format: {len(invalid_format)}")
+            msg = [f"✅ Added {added} keys!"]
             if duplicates:
                 msg.append(f"• Duplicates: {len(duplicates)}")
+            if invalid_format:
+                msg.append(f"• Invalid format: {len(invalid_format)}")
             
             await interaction.followup.send(
                 "\n".join(msg),
                 ephemeral=True
             )
-            
+
         except Exception as e:
-            logging.error(f"Bulk key add error: {str(e)}")
+            logging.error(f"Key addition error: {str(e)}")
             try:
                 await interaction.followup.send(
-                    "❌ Failed to add keys!", 
+                    "❌ Failed to add keys!",
                     ephemeral=True
                 )
             except:
