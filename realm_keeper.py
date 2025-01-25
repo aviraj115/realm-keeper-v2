@@ -355,7 +355,7 @@ class RealmBot(commands.AutoShardedBot):
             self.ready.set()
             
             logging.info(f"✅ Bot ready as {self.user}")
-        except Exception as e:
+    except Exception as e:
             logging.error(f"Ready event error: {e}")
             raise
     
@@ -364,11 +364,11 @@ class RealmBot(commands.AutoShardedBot):
         try:
             if self.cleanup:
                 await self.cleanup.stop()
-            if self.session:
-                await self.session.close()
-            if self.connector:
-                await self.connector.close()
-            await super().close()
+        if self.session:
+            await self.session.close()
+        if self.connector:
+            await self.connector.close()
+        await super().close()
         except Exception as e:
             logging.error(f"Shutdown error: {e}")
 
@@ -851,7 +851,7 @@ async def create_dynamic_command(command_name: str, guild_id: int, client: disco
     """Create a dynamic claim command for a guild"""
     try:
         guild = client.get_guild(guild_id)
-        if not guild:
+    if not guild:
             logging.error(f"Guild {guild_id} not found")
             return False
 
@@ -861,7 +861,7 @@ async def create_dynamic_command(command_name: str, guild_id: int, client: disco
         async def dynamic_claim(interaction: discord.Interaction):
             """Dynamic claim command"""
             if interaction.guild_id != guild_id:
-                return
+            return
             
             try:
                 # Create and send modal
@@ -877,13 +877,13 @@ async def create_dynamic_command(command_name: str, guild_id: int, client: disco
                 except:
                     pass
 
-        # Remove existing command if it exists
-        try:
+    # Remove existing command if it exists
+    try:
             existing = client.tree.get_command(command_name, guild=guild)
-            if existing:
+        if existing:
                 client.tree.remove_command(command_name, guild=guild)
-        except:
-            pass
+    except:
+        pass
 
         # Add and sync command
         client.tree.add_command(dynamic_claim, guild=guild)
@@ -924,7 +924,6 @@ class RealmKeeper(commands.Cog):
             await self.bot.tree.sync(guild=guild)
             logging.info(f"Synced commands to guild {guild_id}")
             return True
-            
         except Exception as e:
             logging.error(f"Guild sync error: {str(e)}")
             return False
@@ -970,48 +969,44 @@ class RealmKeeper(commands.Cog):
     async def setup(self, interaction: discord.Interaction, file: discord.Attachment = None):
         """Initial server setup"""
         try:
-            # Use asyncio_timeout instead of asyncio.timeout
-            async with asyncio_timeout() as timeout:
-                timeout.timeout = self.interaction_timeout
-                
-                # Check bot permissions
-                if not interaction.guild.me.guild_permissions.manage_roles:
+            # Check bot permissions
+            if not interaction.guild.me.guild_permissions.manage_roles:
+                await interaction.response.send_message(
+                    "❌ Bot needs 'Manage Roles' permission!",
+                    ephemeral=True
+                )
+                return
+
+            # Store file content if provided
+            initial_keys = []
+            if file:
+                if not file.filename.endswith('.txt'):
                     await interaction.response.send_message(
-                        "❌ Bot needs 'Manage Roles' permission!",
+                        "❌ Please provide a .txt file!",
+                        ephemeral=True
+                    )
+                    return
+                    
+                if file.size > 10 * 1024 * 1024:  # 10MB limit
+                    await interaction.response.send_message(
+                        "❌ File too large! Maximum size is 10MB.",
                         ephemeral=True
                     )
                     return
 
-                # Store file content if provided
-                initial_keys = []
-                if file:
-                    if not file.filename.endswith('.txt'):
-                        await interaction.response.send_message(
-                            "❌ Please provide a .txt file!",
-                            ephemeral=True
-                        )
-                        return
-                        
-                    if file.size > 10 * 1024 * 1024:  # 10MB limit
-                        await interaction.response.send_message(
-                            "❌ File too large! Maximum size is 10MB.",
-                            ephemeral=True
-                        )
-                        return
+                # Read file content
+                content = await file.read()
+                try:
+                    text = content.decode('utf-8')
+                    initial_keys = [k.strip() for k in text.split('\n') if k.strip()]
+                except UnicodeDecodeError:
+                    await interaction.response.send_message(
+                        "❌ Invalid file encoding! Please use UTF-8.",
+                        ephemeral=True
+                    )
+                    return
 
-                    # Read file content
-                    content = await file.read()
-                    try:
-                        text = content.decode('utf-8')
-                        initial_keys = [k.strip() for k in text.split('\n') if k.strip()]
-                    except UnicodeDecodeError:
-                        await interaction.response.send_message(
-                            "❌ Invalid file encoding! Please use UTF-8.",
-                            ephemeral=True
-                        )
-                        return
-
-                await interaction.response.send_modal(SetupModal(initial_keys))
+            await interaction.response.send_modal(SetupModal(initial_keys))
 
         except TimeoutError:
             await self.handle_interaction_timeout(interaction)
@@ -1036,7 +1031,6 @@ class RealmKeeper(commands.Cog):
                     "❌ Failed to sync commands!",
                     ephemeral=True
                 )
-                
         except Exception as e:
             await self.handle_interaction_error(interaction, e, "Sync failed!")
     
@@ -1059,31 +1053,25 @@ class RealmKeeper(commands.Cog):
             return
 
         # Check if key exists
-        exists = False
-        for h in guild_config.main_store:
-            if (await KeySecurity.verify_key(key, h))[0]:
-                exists = True
-                break
-                
-        if exists:
+        if key.lower() in guild_config.main_store:
             await interaction.response.send_message("❌ Key exists!", ephemeral=True)
             return
 
-        hashed = KeySecurity.hash_key(key)
-        await guild_config.add_key(hashed, guild_id)
+        # Add key directly
+        guild_config.main_store.add(key.lower())
         await interaction.client.config.save()
         stats.log_keys_added(guild_id, 1)
         await audit.log_key_add(interaction, 1)
         
         await interaction.response.send_message("✅ Key added!", ephemeral=True)
-
+    
     @app_commands.command(name="addkeys", description="🔑 Add multiple keys")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def addkeys(self, interaction: discord.Interaction):
         """Add multiple keys"""
         await interaction.response.send_modal(BulkKeyModal())
-
+    
     @app_commands.command(name="removekey", description="🗑️ Remove a single key")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
@@ -1094,36 +1082,27 @@ class RealmKeeper(commands.Cog):
             await interaction.response.send_message("❌ Run /setup first!", ephemeral=True)
             return
 
-        # Validate UUID format
         try:
             uuid_obj = uuid.UUID(key, version=4)
-            if str(uuid_obj) != key.lower():
-                raise ValueError("Not a valid UUIDv4")
+            key_normalized = str(uuid_obj)
         except ValueError:
             await interaction.response.send_message("❌ Invalid UUID format!", ephemeral=True)
             return
 
-        # Find and remove key
-        removed = False
-        for full_hash in list(guild_config.main_store):
-            if KeySecurity.verify_key(key, full_hash)[0]:
-                await guild_config.remove_key(full_hash, guild_id)
-                removed = True
-                break
-
-        if removed:
+        if key_normalized in guild_config.main_store:
+            guild_config.main_store.remove(key_normalized)
             await interaction.client.config.save()
             await interaction.response.send_message("✅ Key removed!", ephemeral=True)
         else:
             await interaction.response.send_message("❌ Key not found!", ephemeral=True)
-
+    
     @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     async def removekeys(self, interaction: discord.Interaction):
         """Remove multiple keys"""
         await interaction.response.send_modal(RemoveKeysModal())
-
+    
     @app_commands.command(name="clearkeys", description="🗑️ Remove all keys")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
@@ -1398,7 +1377,7 @@ class RealmKeeper(commands.Cog):
                 f"• Total processed: {len(key_list)}",
                 ephemeral=True
             )
-
+            
         except Exception as e:
             logging.error(f"File processing error: {str(e)}")
             try:
@@ -1429,7 +1408,7 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                     "❌ Run /setup first!", 
                     ephemeral=True
                 )
-                return
+            return
 
             # Validate all keys first
             key_list = [k.strip() for k in self.keys.value.split("\n") if k.strip()]
@@ -1458,9 +1437,9 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
                     msg.append(f"• Invalid format: {len(invalid_format)}")
                 await interaction.followup.send(
                     "\n".join(msg),
-                    ephemeral=True
-                )
-                return
+        ephemeral=True
+    )
+            return
 
             # Remove valid keys
             removed = 0
@@ -1496,9 +1475,9 @@ class RemoveKeysModal(discord.ui.Modal, title="Remove Multiple Keys"):
             logging.error(f"Key removal error: {str(e)}")
             try:
                 await interaction.followup.send(
-                    "❌ Failed to remove keys!",
-                    ephemeral=True
-                )
+                "❌ Failed to remove keys!",
+            ephemeral=True
+        )
             except:
                 pass
 
@@ -1544,11 +1523,11 @@ class KeySecurity:
     HASH_ROUNDS = 4  # Reduced for better performance
     _salt = None
     _metrics = defaultdict(lambda: {
-        'hashes': 0,
-        'verifications': 0,
-        'failures': 0,
-        'avg_verify_time': 0.0
-    })
+            'hashes': 0,
+            'verifications': 0,
+            'failures': 0,
+            'avg_verify_time': 0.0
+        })
     
     # Cache settings
     _verify_cache = {}
@@ -1563,22 +1542,22 @@ class KeySecurity:
     def _get_salt(cls) -> bytes:
         """Get or generate salt with proper error handling"""
         if cls._salt is None:
-            try:
-                # Try to load from environment
-                if salt := os.getenv('HASH_SALT'):
+        try:
+            # Try to load from environment
+            if salt := os.getenv('HASH_SALT'):
                     cls._salt = base64.b64decode(salt)
                 else:
-                    # Generate new salt
+            # Generate new salt
                     cls._salt = secrets.token_bytes(16)
                     encoded = base64.b64encode(cls._salt).decode()
-                    
-                    # Save to .env file
-                    with open('.env', 'a') as f:
-                        f.write(f"\nHASH_SALT={encoded}")
-                    
-                    logging.warning("Generated new HASH_SALT")
-            except Exception as e:
-                logging.error(f"Salt initialization error: {str(e)}")
+            
+            # Save to .env file
+            with open('.env', 'a') as f:
+                f.write(f"\nHASH_SALT={encoded}")
+            
+            logging.warning("Generated new HASH_SALT")
+        except Exception as e:
+            logging.error(f"Salt initialization error: {str(e)}")
                 cls._salt = secrets.token_bytes(16)  # Use fallback salt
         return cls._salt
     
@@ -1917,7 +1896,6 @@ class ArcaneGatewayModal(discord.ui.Modal):
             if key_normalized in guild_config.main_store:
                 # Remove key and grant role
                 guild_config.main_store.remove(key_normalized)
-                guild_config.bloom.remove(key_normalized) if hasattr(guild_config.bloom, 'remove') else None
                 await interaction.client.config.save()
                 
                 try:
@@ -1951,7 +1929,7 @@ class ArcaneGatewayModal(discord.ui.Modal):
                     "🌑 This key holds no power in these lands...", 
                     ephemeral=True
                 )
-
+                
         except Exception as e:
             logging.error(f"Claim error: {str(e)}")
             try:
@@ -2154,7 +2132,7 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 placeholder="Optional: Paste your keys here (UUIDs, one per line)",
                 required=False,
                 max_length=4000
-            ))
+        ))
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -2177,7 +2155,7 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                     "🚫 That command name is reserved! Please choose another.",
                     ephemeral=True
                 )
-                return
+            return
 
             # Find role by name
             role = discord.utils.get(interaction.guild.roles, name=role_name)
@@ -2201,24 +2179,24 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             if role >= bot_member.top_role:
                 await interaction.followup.send(
                     "⚠️ Bot's highest role must be above the target role!",
-                    ephemeral=True
-                )
+                ephemeral=True
+            )
                 return
 
             # Check if role is managed by integration
             if role.managed:
                 await interaction.followup.send(
                     "⚠️ Cannot use integration-managed roles!",
-                    ephemeral=True
-                )
+                ephemeral=True
+            )
                 return
 
             # Check if role is @everyone
             if role.is_default():
                 await interaction.followup.send(
                     "⚠️ Cannot use @everyone role!",
-                    ephemeral=True
-                )
+                ephemeral=True
+            )
                 return
 
             # Create config with empty key set first
@@ -2236,8 +2214,8 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             if initial_keys:
                 await interaction.followup.send(
                     f"⏳ Processing {len(initial_keys)} initial keys...",
-                    ephemeral=True
-                )
+                ephemeral=True
+            )
                 
                 # Pre-validate all keys first
                 valid_keys = {}
@@ -2259,7 +2237,7 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                     added = len(valid_keys)
                     
                     # Save after bulk add
-                    await interaction.client.config.save()
+            await interaction.client.config.save()
                     stats.log_keys_added(guild_id, added)
                     await audit.log_key_add(interaction, added)
             
@@ -2294,8 +2272,8 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             try:
                 await interaction.followup.send(
                     "💔 Setup failed! Please try again.",
-                    ephemeral=True
-                )
+            ephemeral=True
+        )
             except:
                 pass
 
