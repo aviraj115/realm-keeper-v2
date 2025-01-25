@@ -142,11 +142,13 @@ class RealmKeeper(commands.Bot):
     async def process_claim(self, interaction: discord.Interaction, key: str):
         """Process a key claim attempt"""
         try:
+            await interaction.response.defer(ephemeral=True)
+            
             guild_id = interaction.guild.id
             cfg = self.config.get(guild_id)
             
             if not cfg:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "🌌 The mystical gateway has not yet been established in this realm!",
                     ephemeral=True
                 )
@@ -155,7 +157,7 @@ class RealmKeeper(commands.Bot):
             # Get role first to do early checks
             role = interaction.guild.get_role(cfg.role_id)
             if not role:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "⚠️ The destined role has vanished from this realm! Seek the council of an elder.",
                     ephemeral=True
                 )
@@ -168,7 +170,7 @@ class RealmKeeper(commands.Bot):
                     remaining = int(cfg.custom_cooldown - (time.time() - last_try))
                     minutes = remaining // 60
                     seconds = remaining % 60
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         f"⌛ The arcane energies must replenish... Return in {minutes}m {seconds}s.",
                         ephemeral=True
                     )
@@ -182,40 +184,32 @@ class RealmKeeper(commands.Bot):
                     await self.save_config()
                     
                     try:
-                        # Add role if user doesn't have it
-                        if role not in interaction.user.roles:
-                            await interaction.user.add_roles(role)
-                            cfg.stats['successful_claims'] += 1
-                            
-                            success_msg = random.choice(cfg.success_msgs)
-                            await interaction.response.send_message(
-                                success_msg.format(
-                                    user=interaction.user.mention,
-                                    role=role.mention
-                                ),
-                                ephemeral=True
-                            )
-                        else:
-                            # If user already has the role, just consume the key
-                            await interaction.response.send_message(
-                                "🎭 You already possess this power! The key's energy dissipates...",
-                                ephemeral=True
-                            )
+                        await interaction.user.add_roles(role)
+                        cfg.stats['successful_claims'] += 1
+                        
+                        success_msg = random.choice(cfg.success_msgs)
+                        await interaction.followup.send(
+                            success_msg.format(
+                                user=interaction.user.mention,
+                                role=role.mention
+                            ),
+                            ephemeral=True
+                        )
                     except discord.Forbidden:
-                        await interaction.response.send_message(
+                        await interaction.followup.send(
                             "🔒 The mystical barriers prevent me from bestowing this power!",
                             ephemeral=True
                         )
                     except Exception as e:
                         logging.error(f"Role grant error: {str(e)}")
-                        await interaction.response.send_message(
+                        await interaction.followup.send(
                             "💔 The ritual of bestowal has failed!",
                             ephemeral=True
                         )
                 else:
                     cfg.stats['failed_claims'] += 1
                     cfg.cooldowns[interaction.user.id] = time.time()
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "🌑 This key holds no power in these lands...",
                         ephemeral=True
                     )
@@ -223,7 +217,7 @@ class RealmKeeper(commands.Bot):
         except Exception as e:
             logging.error(f"Claim error: {str(e)}")
             try:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "❌ Failed to process your key!",
                     ephemeral=True
                 )
