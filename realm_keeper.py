@@ -539,6 +539,117 @@ class RemoveKeysModal(discord.ui.Modal):
                 ephemeral=True
             )
 
+class ArcaneGatewayModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="🔮 Mystical Gateway")
+        self.add_item(discord.ui.TextInput(
+            label="✨ Present Your Arcane Key",
+            placeholder="Inscribe your mystical key (format: xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx)",
+            min_length=36,
+            max_length=36,
+            required=True
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await bot.process_claim(interaction, self.children[0].value.strip())
+
+class CustomizeModal(discord.ui.Modal):
+    def __init__(self, current_messages):
+        super().__init__(title="📜 Customize Success Messages")
+        self.add_item(discord.ui.TextInput(
+            label="✨ Success Messages (one per line)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Use {user} for the user and {role} for the role\nExample: ✨ {user} has unlocked the {role} role!",
+            default="\n".join(current_messages),
+            required=True,
+            max_length=4000
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            guild_id = interaction.guild.id
+            cfg = bot.config.get(guild_id)
+            
+            if not cfg:
+                await interaction.followup.send(
+                    "❌ Run /setup first!",
+                    ephemeral=True
+                )
+                return
+            
+            # Parse and validate messages
+            messages = [msg.strip() for msg in self.children[0].value.split('\n') if msg.strip()]
+            
+            if not messages:
+                await interaction.followup.send(
+                    "⚠️ Please provide at least one message!",
+                    ephemeral=True
+                )
+                return
+            
+            # Validate message format
+            invalid = []
+            for msg in messages:
+                if "{user}" not in msg or "{role}" not in msg:
+                    invalid.append(msg)
+            
+            if invalid:
+                await interaction.followup.send(
+                    "⚠️ Some messages are missing {user} or {role} placeholders:\n" +
+                    "\n".join(f"• {msg}" for msg in invalid[:3]) +
+                    ("\n..." if len(invalid) > 3 else ""),
+                    ephemeral=True
+                )
+                return
+            
+            # Update messages
+            cfg.success_msgs = messages
+            await bot.save_config()
+            
+            await interaction.followup.send(
+                f"✨ Updated success messages! Added {len(messages)} messages.",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logging.error(f"Customize error: {str(e)}")
+            await interaction.followup.send(
+                "💔 Failed to update messages!",
+                ephemeral=True
+            )
+
+# Add customize command
+@bot.tree.command(name="customize", description="📜 Customize success messages")
+@app_commands.default_permissions(administrator=True)
+async def customize(interaction: discord.Interaction):
+    """Customize success messages"""
+    guild_id = interaction.guild.id
+    cfg = bot.config.get(guild_id)
+    
+    if not cfg:
+        await interaction.response.send_message(
+            "❌ Run /setup first!",
+            ephemeral=True
+        )
+        return
+        
+    await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
+
+# Update claim command to use modal
+@bot.tree.command(name="claim", description="✨ Claim your role with a mystical key")
+async def claim(interaction: discord.Interaction):
+    """Claim your role with a key"""
+    if interaction.guild_id not in bot.config:
+        await interaction.response.send_message(
+            "🌌 The mystical gateway has not yet been established in this realm!",
+            ephemeral=True
+        )
+        return
+        
+    await interaction.response.send_modal(ArcaneGatewayModal())
+
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
