@@ -92,19 +92,26 @@ class RealmKeeper(commands.Bot):
     async def setup_hook(self):
         """Initialize bot systems"""
         try:
-            # Set custom activity
-            activity = discord.Activity(
-                type=discord.ActivityType.watching,
-                name="for ✨ mystical keys"
-            )
-            await self.change_presence(activity=activity)
-            
             # Load config and sync commands
             await self.load_config()
             await self.tree.sync()
             logging.info("Realm Keeper initialized")
         except Exception as e:
             logging.error(f"Setup error: {e}")
+            raise
+
+    async def on_ready(self):
+        """Called when bot is ready"""
+        try:
+            # Set custom activity
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name="for ✨ mystical keys"
+            )
+            await self.change_presence(activity=activity)
+            logging.info(f"✅ Bot ready as {self.user}")
+        except Exception as e:
+            logging.error(f"Ready event error: {e}")
             raise
 
     async def load_config(self):
@@ -172,6 +179,14 @@ class RealmKeeper(commands.Bot):
             if not role:
                 await interaction.followup.send(
                     "⚠️ The destined role has vanished from this realm! Seek the council of an elder.",
+                    ephemeral=True
+                )
+                return
+
+            # Check if user already has the role
+            if role in interaction.user.roles:
+                await interaction.followup.send(
+                    "✨ You have already been blessed with this power! One cannot claim the same blessing twice.",
                     ephemeral=True
                 )
                 return
