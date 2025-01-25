@@ -137,13 +137,18 @@ class RealmKeeper(commands.Bot):
         if (guild_id, command_name) in self.registered_commands:
             return
 
-        @app_commands.command(name=command_name, description="Claim your role with a mystical key")
+        @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
         @app_commands.guild_only()
-        async def claim_command(interaction: discord.Interaction, key: str):
-            await self.process_claim(interaction, key)
+        async def claim_command(interaction: discord.Interaction):
+            """Claim your role with a key"""
+            if interaction.guild_id != guild_id:
+                return
+            
+            await interaction.response.send_modal(ArcaneGatewayModal())
         
         self.tree.add_command(claim_command, guild=discord.Object(id=guild_id))
         self.registered_commands.add((guild_id, command_name))
+        logging.info(f"Created command /{command_name} in guild {guild_id}")
 
     async def save_config(self):
         data = {
@@ -683,19 +688,6 @@ async def customize(interaction: discord.Interaction):
         return
         
     await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
-
-# Update claim command to use modal
-@bot.tree.command(name="claim", description="✨ Claim your role with a mystical key")
-async def claim(interaction: discord.Interaction):
-    """Claim your role with a key"""
-    if interaction.guild_id not in bot.config:
-        await interaction.response.send_message(
-            "🌌 The mystical gateway has not yet been established in this realm!",
-            ephemeral=True
-        )
-        return
-        
-    await interaction.response.send_modal(ArcaneGatewayModal())
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
