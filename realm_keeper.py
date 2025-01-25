@@ -163,6 +163,23 @@ class RealmKeeper(commands.Bot):
                 )
                 return
 
+            # Check bot's role hierarchy
+            bot_member = interaction.guild.me
+            if bot_member.top_role <= role:
+                await interaction.followup.send(
+                    "⚠️ My role must be higher than the role I'm trying to grant! Please move my role up in the server settings.",
+                    ephemeral=True
+                )
+                return
+
+            # Check bot's permissions
+            if not bot_member.guild_permissions.manage_roles:
+                await interaction.followup.send(
+                    "⚠️ I need the 'Manage Roles' permission to grant roles!",
+                    ephemeral=True
+                )
+                return
+
             # Check cooldown for non-admins
             if not interaction.user.guild_permissions.administrator:
                 last_try = cfg.cooldowns.get(interaction.user.id, 0)
@@ -184,7 +201,7 @@ class RealmKeeper(commands.Bot):
                     await self.save_config()
                     
                     try:
-                        await interaction.user.add_roles(role)
+                        await interaction.user.add_roles(role, reason="Key claim")
                         cfg.stats['successful_claims'] += 1
                         
                         success_msg = random.choice(cfg.success_msgs)
@@ -197,13 +214,13 @@ class RealmKeeper(commands.Bot):
                         )
                     except discord.Forbidden:
                         await interaction.followup.send(
-                            "🔒 The mystical barriers prevent me from bestowing this power!",
+                            "🔒 The mystical barriers prevent me from bestowing this power! (Role hierarchy or permissions issue)",
                             ephemeral=True
                         )
                     except Exception as e:
                         logging.error(f"Role grant error: {str(e)}")
                         await interaction.followup.send(
-                            "💔 The ritual of bestowal has failed!",
+                            f"💔 The ritual of bestowal has failed! Error: {str(e)}",
                             ephemeral=True
                         )
                 else:
@@ -218,7 +235,7 @@ class RealmKeeper(commands.Bot):
             logging.error(f"Claim error: {str(e)}")
             try:
                 await interaction.followup.send(
-                    "❌ Failed to process your key!",
+                    f"❌ Failed to process your key! Error: {str(e)}",
                     ephemeral=True
                 )
             except:
