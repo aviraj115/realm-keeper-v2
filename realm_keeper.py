@@ -20,9 +20,16 @@ logging.basicConfig(
 )
 
 DRAMATIC_MESSAGES = [
-    "🌟 {user} has proven worthy of {role}!",
-    "⚔️ The sacred {role} mantle falls upon {user}!",
-    # ... (keep all original messages)
+    "🌟 The ancient scrolls have recognized {user} as a true {role}!",
+    "⚔️ Through trials of valor, {user} ascends to the ranks of {role}!",
+    "✨ The mystical gates of {role} part before {user}'s destined arrival!",
+    "🔮 The oracles have foreseen it - {user} joins the sacred order of {role}!",
+    "🏰 The grand halls of {role} echo with cheers as {user} takes their rightful place!",
+    "⚡ The powers of {role} surge through {user}'s very being!",
+    "🌈 A new light shines as {user} joins the {role} fellowship!",
+    "🎭 The {role} welcomes their newest member, {user}!",
+    "💫 {user} has proven worthy of the {role}'s ancient power!",
+    "🔥 The flames of destiny mark {user} as a true {role}!"
 ]
 
 class GuildConfig:
@@ -217,23 +224,11 @@ class RealmKeeper(commands.Bot):
 
 bot = RealmKeeper()
 
-# Original Setup Command
-@bot.tree.command(name="setup", description="Initialize a new realm")
+# Setup Command
+@bot.tree.command(name="setup", description="🏰 Initialize a new realm")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(
-    role="Role to grant",
-    command_name="Claim command name (default: claim)",
-    file="Optional: Text file containing initial keys (one per line)"
-)
-async def setup(
-    interaction: discord.Interaction,
-    role: discord.Role,
-    command_name: str = "claim",
-    file: discord.Attachment = None
-):
-    """Setup functionality with initial key support"""
-    guild_id = interaction.guild.id
-    
+async def setup(interaction: discord.Interaction):
+    """Initialize a new realm"""
     # Validate permissions
     if not interaction.guild.me.guild_permissions.manage_roles:
         await interaction.response.send_message(
@@ -242,73 +237,35 @@ async def setup(
         )
         return
 
-    # Validate command name
-    if command_name in bot.registered_commands:
+    await interaction.response.send_modal(SetupModal())
+
+# Add Keys Command
+@bot.tree.command(name="addkeys", description="📚 Add multiple keys")
+@app_commands.default_permissions(administrator=True)
+async def addkeys(interaction: discord.Interaction):
+    """Add multiple keys"""
+    if interaction.guild_id not in bot.config:
         await interaction.response.send_message(
-            "⚠️ This command name is already in use!",
+            "❌ Run /setup first!",
             ephemeral=True
         )
         return
+        
+    await interaction.response.send_modal(BulkKeyModal())
 
-    await interaction.response.defer(ephemeral=True)
-
-    # Initialize realm configuration
-    bot.config[guild_id] = GuildConfig(role.id)
-    cfg = bot.config[guild_id]
-    cfg.command = command_name.lower()
-    
-    # Process initial keys if provided
-    if file:
-        if not file.filename.endswith('.txt'):
-            await interaction.followup.send(
-                "📄 Only text files are accepted!",
-                ephemeral=True
-            )
-            return
-
-        if file.size > 2 * 1024 * 1024:  # 2MB limit
-            await interaction.followup.send(
-                "⚖️ File too large (max 2MB)!",
-                ephemeral=True
-            )
-            return
-
-        try:
-            content = await file.read()
-            keys = [k.strip() for k in content.decode('utf-8').split('\n') if k.strip()]
-            
-            added = 0
-            invalid = 0
-            
-            for key in keys:
-                if cfg.add_key(key):
-                    added += 1
-                else:
-                    invalid += 1
-
-            cfg.stats['keys_added'] = added
-            
-        except Exception as e:
-            logging.error(f"Failed to process initial keys: {str(e)}")
-            await interaction.followup.send(
-                "⚠️ Failed to process some initial keys!",
-                ephemeral=True
-            )
-    
-    # Create dynamic command
-    bot._create_dynamic_command(guild_id, command_name)
-    await bot.tree.sync(guild=discord.Object(id=guild_id))
-    await bot.save_config()
-    
-    response = [
-        f"✨ Realm initialized for {role.mention}!",
-        f"Use `/{command_name}` with valid keys to claim your role."
-    ]
-    
-    if file:
-        response.append(f"\n📦 Loaded {added} initial keys ({invalid} invalid)")
-    
-    await interaction.followup.send("\n".join(response), ephemeral=True)
+# Remove Keys Command
+@bot.tree.command(name="removekeys", description="🗑️ Remove multiple keys")
+@app_commands.default_permissions(administrator=True)
+async def removekeys(interaction: discord.Interaction):
+    """Remove multiple keys"""
+    if interaction.guild_id not in bot.config:
+        await interaction.response.send_message(
+            "❌ Run /setup first!",
+            ephemeral=True
+        )
+        return
+        
+    await interaction.response.send_modal(RemoveKeysModal())
 
 # Original Loadkeys Command
 @bot.tree.command(name="loadkeys", description="Load keys from a text file")
@@ -384,6 +341,203 @@ async def loadkeys(
 
 # Keep other original commands (addkeys, removekeys, clearkeys, etc.) 
 # with their original implementations from previous versions
+
+class SetupModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="🏰 Realm Setup")
+        self.add_item(discord.ui.TextInput(
+            label="✨ Role Name",
+            placeholder="Enter the exact role name to grant",
+            min_length=1,
+            max_length=100,
+            required=True
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="🔮 Command Name",
+            placeholder="Enter command name (e.g. claim, verify, redeem)",
+            default="claim",
+            min_length=1,
+            max_length=32,
+            required=True
+        ))
+        self.add_item(discord.ui.TextInput(
+            label="📜 Initial Keys (Optional)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Add initial keys here (one per line)",
+            required=False,
+            max_length=4000
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            # Get role by name
+            role_name = self.children[0].value.strip()
+            role = discord.utils.get(interaction.guild.roles, name=role_name)
+            
+            if not role:
+                await interaction.followup.send(
+                    "❌ Role not found! Please enter the exact role name.",
+                    ephemeral=True
+                )
+                return
+            
+            # Validate command name
+            command_name = self.children[1].value.strip().lower()
+            if command_name in bot.registered_commands:
+                await interaction.followup.send(
+                    "⚠️ This command name is already in use!",
+                    ephemeral=True
+                )
+                return
+            
+            # Initialize realm configuration
+            guild_id = interaction.guild.id
+            bot.config[guild_id] = GuildConfig(role.id)
+            cfg = bot.config[guild_id]
+            cfg.command = command_name
+            
+            # Process initial keys if provided
+            initial_keys = self.children[2].value.strip()
+            if initial_keys:
+                keys = [k.strip() for k in initial_keys.split('\n') if k.strip()]
+                added = 0
+                invalid = 0
+                
+                for key in keys:
+                    if cfg.add_key(key):
+                        added += 1
+                    else:
+                        invalid += 1
+                
+                cfg.stats['keys_added'] = added
+            
+            # Create dynamic command
+            bot._create_dynamic_command(guild_id, command_name)
+            await bot.tree.sync(guild=discord.Object(id=guild_id))
+            await bot.save_config()
+            
+            # Build response
+            response = [
+                f"✨ Realm initialized for {role.mention}!",
+                f"Use `/{command_name}` with valid keys to claim your role."
+            ]
+            
+            if initial_keys:
+                response.append(f"\n📦 Loaded {added} initial keys ({invalid} invalid)")
+            
+            await interaction.followup.send("\n".join(response), ephemeral=True)
+            
+        except Exception as e:
+            logging.error(f"Setup error: {str(e)}")
+            await interaction.followup.send(
+                "💔 Failed to setup the realm!",
+                ephemeral=True
+            )
+
+class BulkKeyModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="📚 Bulk Key Addition")
+        self.add_item(discord.ui.TextInput(
+            label="🔑 Keys",
+            style=discord.TextStyle.paragraph,
+            placeholder="Paste your keys here (one per line)",
+            required=True,
+            max_length=4000
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            guild_id = interaction.guild.id
+            cfg = bot.config.get(guild_id)
+            
+            if not cfg:
+                await interaction.followup.send(
+                    "❌ Run /setup first!",
+                    ephemeral=True
+                )
+                return
+            
+            keys = [k.strip() for k in self.children[0].value.split('\n') if k.strip()]
+            
+            async with bot.locks[guild_id]:
+                added = 0
+                invalid = 0
+                
+                for key in keys:
+                    if cfg.add_key(key):
+                        added += 1
+                    else:
+                        invalid += 1
+                
+                cfg.stats['keys_added'] += added
+                await bot.save_config()
+            
+            await interaction.followup.send(
+                f"📦 Added {added} keys ({invalid} invalid)",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logging.error(f"Bulk key error: {str(e)}")
+            await interaction.followup.send(
+                "💔 Failed to process keys!",
+                ephemeral=True
+            )
+
+class RemoveKeysModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="🗑️ Remove Keys")
+        self.add_item(discord.ui.TextInput(
+            label="🔑 Keys to Remove",
+            style=discord.TextStyle.paragraph,
+            placeholder="Enter keys to remove (one per line)",
+            required=True,
+            max_length=4000
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            guild_id = interaction.guild.id
+            cfg = bot.config.get(guild_id)
+            
+            if not cfg:
+                await interaction.followup.send(
+                    "❌ Run /setup first!",
+                    ephemeral=True
+                )
+                return
+            
+            keys = [k.strip() for k in self.children[0].value.split('\n') if k.strip()]
+            
+            async with bot.locks[guild_id]:
+                removed = 0
+                not_found = 0
+                
+                for key in keys:
+                    if cfg.remove_key(key):
+                        removed += 1
+                    else:
+                        not_found += 1
+                
+                await bot.save_config()
+            
+            await interaction.followup.send(
+                f"🗑️ Removed {removed} keys ({not_found} not found)",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logging.error(f"Remove keys error: {str(e)}")
+            await interaction.followup.send(
+                "💔 Failed to remove keys!",
+                ephemeral=True
+            )
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
