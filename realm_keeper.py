@@ -1901,12 +1901,11 @@ class ArcaneGatewayModal(discord.ui.Modal):
                     return
 
             # Validate and normalize key format
-            key_value = self.children[0].value.strip()
+            key_input = self.children[0].value.strip()
             try:
-                uuid_obj = uuid.UUID(key_value, version=4)
-                key_lower = str(uuid_obj).lower()  # Normalize to canonical UUID format
-                if key_lower != key_value.lower():
-                    raise ValueError()
+                # Convert to UUID and back to ensure proper format
+                uuid_obj = uuid.UUID(key_input)
+                key_normalized = str(uuid_obj)  # This gives us the canonical format with dashes
             except ValueError:
                 await interaction.followup.send(
                     "📜 This key's pattern is foreign to our mystic tomes...", 
@@ -1914,22 +1913,11 @@ class ArcaneGatewayModal(discord.ui.Modal):
                 )
                 return
 
-            # Quick check using bloom filter
-            if key_lower not in guild_config.bloom:
-                stats.log_claim(guild_id, False)
-                await audit.log_claim(interaction, False)
-                await interaction.followup.send(
-                    "🌑 This key holds no power in these lands...", 
-                    ephemeral=True
-                )
-                return
-
-            # Generate hash and check
-            key_hash = KeySecurity.hash_key(key_lower)
-            if key_hash in guild_config.main_store:
+            # Direct key lookup
+            if key_normalized in guild_config.main_store:
                 # Remove key and grant role
-                guild_config.main_store.remove(key_hash)
-                guild_config.bloom.remove(key_lower) if hasattr(guild_config.bloom, 'remove') else None
+                guild_config.main_store.remove(key_normalized)
+                guild_config.bloom.remove(key_normalized) if hasattr(guild_config.bloom, 'remove') else None
                 await interaction.client.config.save()
                 
                 try:
@@ -2092,16 +2080,14 @@ class BulkKeyModal(discord.ui.Modal, title="Add Multiple Keys"):
                 # Process chunk
                 for key in chunk:
                     try:
-                        uuid_obj = uuid.UUID(key, version=4)
-                        key_lower = str(uuid_obj).lower()  # Normalize to canonical UUID format
-                        if key_lower == key.lower():
-                            # Store both the key and its hash
-                            key_hash = KeySecurity.hash_key(key_lower)
-                            guild_config.main_store.add(key_hash)
-                            guild_config.bloom.add(key_lower)  # Store normalized key in bloom filter
-                            added += 1
-                        else:
-                            invalid += 1
+                        # Convert to UUID and back to ensure proper format
+                        uuid_obj = uuid.UUID(key)
+                        key_normalized = str(uuid_obj)  # This gives us the canonical format with dashes
+                        
+                        # Store the normalized key directly
+                        guild_config.main_store.add(key_normalized)
+                        guild_config.bloom.add(key_normalized)
+                        added += 1
                     except ValueError:
                         invalid += 1
 
