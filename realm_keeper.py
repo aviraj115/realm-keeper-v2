@@ -90,9 +90,22 @@ class RealmKeeper(commands.Bot):
         self.registered_commands = set()
 
     async def setup_hook(self):
-        await self.load_config()
-        await self.tree.sync()
-        logging.info("Realm Keeper initialized")
+        """Initialize bot systems"""
+        try:
+            # Set custom activity
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name="for ✨ mystical keys"
+            )
+            await self.change_presence(activity=activity)
+            
+            # Load config and sync commands
+            await self.load_config()
+            await self.tree.sync()
+            logging.info("Realm Keeper initialized")
+        except Exception as e:
+            logging.error(f"Setup error: {e}")
+            raise
 
     async def load_config(self):
         try:
