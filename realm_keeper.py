@@ -182,17 +182,25 @@ class RealmKeeper(commands.Bot):
                     await self.save_config()
                     
                     try:
-                        await interaction.user.add_roles(role)
-                        cfg.stats['successful_claims'] += 1
-                        
-                        success_msg = random.choice(cfg.success_msgs)
-                        await interaction.response.send_message(
-                            success_msg.format(
-                                user=interaction.user.mention,
-                                role=role.mention
-                            ),
-                            ephemeral=True
-                        )
+                        # Add role if user doesn't have it
+                        if role not in interaction.user.roles:
+                            await interaction.user.add_roles(role)
+                            cfg.stats['successful_claims'] += 1
+                            
+                            success_msg = random.choice(cfg.success_msgs)
+                            await interaction.response.send_message(
+                                success_msg.format(
+                                    user=interaction.user.mention,
+                                    role=role.mention
+                                ),
+                                ephemeral=True
+                            )
+                        else:
+                            # If user already has the role, just consume the key
+                            await interaction.response.send_message(
+                                "🎭 You already possess this power! The key's energy dissipates...",
+                                ephemeral=True
+                            )
                     except discord.Forbidden:
                         await interaction.response.send_message(
                             "🔒 The mystical barriers prevent me from bestowing this power!",
