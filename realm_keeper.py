@@ -43,7 +43,14 @@ class GuildConfig:
         self.key_store = set()
         self.cooldowns = dict()
         self.success_msgs = DRAMATIC_MESSAGES.copy()
-        self.stats = defaultdict(int)
+        self.stats = {
+            'keys_added': 0,
+            'keys_removed': 0,
+            'successful_claims': 0,
+            'failed_claims': 0,
+            'last_claim_time': 0,
+            'total_keys': 0
+        }
         self.custom_cooldown = 300  # Default 5 minutes
 
     def add_key(self, key: str) -> bool:
@@ -51,9 +58,13 @@ class GuildConfig:
         try:
             uuid_obj = uuid.UUID(key)
             key_normalized = str(uuid_obj).lower()
-            self.key_store.add(key_normalized)
-            self.key_filter.add(key_normalized)
-            return True
+            if key_normalized not in self.key_store:
+                self.key_store.add(key_normalized)
+                self.key_filter.add(key_normalized)
+                self.stats['keys_added'] += 1
+                self.stats['total_keys'] = len(self.key_store)
+                return True
+            return False
         except ValueError:
             return False
 
@@ -64,8 +75,8 @@ class GuildConfig:
             key_normalized = str(uuid_obj).lower()
             if key_normalized in self.key_store:
                 self.key_store.remove(key_normalized)
-                if hasattr(self.key_filter, 'remove'):
-                    self.key_filter.remove(key_normalized)
+                self.stats['keys_removed'] += 1
+                self.stats['total_keys'] = len(self.key_store)
                 return True
             return False
         except ValueError:
@@ -76,6 +87,10 @@ class GuildConfig:
         try:
             uuid_obj = uuid.UUID(key)
             key_normalized = str(uuid_obj).lower()
+            # First check Bloom filter for quick rejection
+            if key_normalized not in self.key_filter:
+                return False
+            # Then check actual set
             return key_normalized in self.key_store
         except ValueError:
             return False
@@ -263,16 +278,29 @@ class RealmKeeper(commands.Bot):
                     )
                     return
 
+            # Normalize and verify key
+            try:
+                uuid_obj = uuid.UUID(key.strip())
+                key_normalized = str(uuid_obj).lower()
+            except ValueError:
+                cfg.stats['failed_claims'] += 1
+                await interaction.followup.send(
+                    "❌ Invalid key format! Keys must be in UUID format.",
+                    ephemeral=True
+                )
+                return
+
             # Verify and claim key
             async with self.locks[guild_id]:
-                if cfg.verify_key(key):
+                if cfg.verify_key(key_normalized):
                     # Remove key and grant role
-                    cfg.remove_key(key)
+                    cfg.remove_key(key_normalized)
                     await self.save_config()
                     
                     try:
                         await interaction.user.add_roles(role, reason="Key claim")
                         cfg.stats['successful_claims'] += 1
+                        cfg.stats['last_claim_time'] = int(time.time())
                         
                         success_msg = random.choice(cfg.success_msgs)
                         await interaction.followup.send(
@@ -283,11 +311,17 @@ class RealmKeeper(commands.Bot):
                             ephemeral=True
                         )
                     except discord.Forbidden:
+                        # Restore key if role grant fails
+                        cfg.add_key(key_normalized)
+                        await self.save_config()
                         await interaction.followup.send(
                             "🔒 The mystical barriers prevent me from bestowing this power! (Role hierarchy or permissions issue)",
                             ephemeral=True
                         )
                     except Exception as e:
+                        # Restore key if role grant fails
+                        cfg.add_key(key_normalized)
+                        await self.save_config()
                         logging.error(f"Role grant error: {str(e)}")
                         await interaction.followup.send(
                             f"💔 The ritual of bestowal has failed! Error: {str(e)}",
@@ -761,6 +795,65 @@ async def clearkeys(interaction: discord.Interaction):
         f"🗑️ Cleared {key_count} keys!",
         ephemeral=True
     )
+
+# Add stats command
+@bot.tree.command(name="stats", description="📊 View realm statistics")
+@app_commands.default_permissions(administrator=True)
+async def stats(interaction: discord.Interaction):
+    """View realm statistics"""
+    guild_id = interaction.guild.id
+    cfg = bot.config.get(guild_id)
+    
+    if not cfg:
+        await interaction.response.send_message(
+            "❌ Run /setup first!",
+            ephemeral=True
+        )
+        return
+
+    role = interaction.guild.get_role(cfg.role_id)
+    role_name = role.name if role else "Unknown Role"
+    
+    stats_embed = discord.Embed(
+        title="📊 Realm Statistics",
+        color=discord.Color.blue()
+    )
+    
+    # Key Stats
+    stats_embed.add_field(
+        name="🔑 Key Stats",
+        value=f"Available Keys: {cfg.stats['total_keys']}\n"
+              f"Total Added: {cfg.stats['keys_added']}\n"
+              f"Total Removed: {cfg.stats['keys_removed']}",
+        inline=False
+    )
+    
+    # Claim Stats
+    stats_embed.add_field(
+        name="✨ Claim Stats",
+        value=f"Successful Claims: {cfg.stats['successful_claims']}\n"
+              f"Failed Attempts: {cfg.stats['failed_claims']}",
+        inline=False
+    )
+    
+    # Role Info
+    stats_embed.add_field(
+        name="👥 Role Info",
+        value=f"Role: {role.mention if role else 'Unknown'}\n"
+              f"Command: /{cfg.command}",
+        inline=False
+    )
+    
+    # Last Claim
+    last_claim = cfg.stats['last_claim_time']
+    last_claim_str = f"<t:{last_claim}:R>" if last_claim > 0 else "Never"
+    stats_embed.add_field(
+        name="⌛ Last Claim",
+        value=last_claim_str,
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=stats_embed, ephemeral=True)
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
