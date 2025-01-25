@@ -94,7 +94,23 @@ class RealmKeeper(commands.Bot):
         try:
             # Load config and sync commands
             await self.load_config()
+            
+            # Clear all commands first
+            self.tree.clear_commands(guild=None)  # Clear global commands
+            
+            # Add admin commands
+            admin_commands = [setup, addkeys, removekeys, loadkeys, customize]
+            for cmd in admin_commands:
+                self.tree.add_command(cmd)
+            
+            # Sync global commands
             await self.tree.sync()
+            
+            # Sync guild-specific commands
+            for guild_id, cfg in self.config.items():
+                await self._create_dynamic_command(guild_id, cfg.command)
+                await self.tree.sync(guild=discord.Object(id=guild_id))
+            
             logging.info("Realm Keeper initialized")
         except Exception as e:
             logging.error(f"Setup error: {e}")
@@ -132,23 +148,29 @@ class RealmKeeper(commands.Bot):
         except FileNotFoundError:
             logging.warning("No existing configuration found")
 
-    def _create_dynamic_command(self, guild_id: int, command_name: str):
+    async def _create_dynamic_command(self, guild_id: int, command_name: str):
         """Create dynamic claim command for a guild"""
-        if (guild_id, command_name) in self.registered_commands:
-            return
-
-        @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
-        @app_commands.guild_only()
-        async def claim_command(interaction: discord.Interaction):
-            """Claim your role with a key"""
-            if interaction.guild_id != guild_id:
-                return
+        try:
+            # Remove any existing commands for this guild
+            self.tree.clear_commands(guild=discord.Object(id=guild_id))
             
-            await interaction.response.send_modal(ArcaneGatewayModal())
-        
-        self.tree.add_command(claim_command, guild=discord.Object(id=guild_id))
-        self.registered_commands.add((guild_id, command_name))
-        logging.info(f"Created command /{command_name} in guild {guild_id}")
+            @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
+            @app_commands.guild_only()
+            async def claim_command(interaction: discord.Interaction):
+                """Claim your role with a key"""
+                if interaction.guild_id != guild_id:
+                    return
+                
+                await interaction.response.send_modal(ArcaneGatewayModal())
+            
+            self.tree.add_command(claim_command, guild=discord.Object(id=guild_id))
+            self.registered_commands.add((guild_id, command_name))
+            logging.info(f"Created command /{command_name} in guild {guild_id}")
+            
+            return True
+        except Exception as e:
+            logging.error(f"Failed to create command {command_name} in guild {guild_id}: {e}")
+            return False
 
     async def save_config(self):
         data = {
@@ -437,9 +459,9 @@ class SetupModal(discord.ui.Modal):
             
             # Validate command name
             command_name = self.children[1].value.strip().lower()
-            if command_name in bot.registered_commands:
+            if command_name in ['setup', 'addkeys', 'removekeys', 'loadkeys', 'customize']:
                 await interaction.followup.send(
-                    "⚠️ This command name is already in use!",
+                    "⚠️ This command name is reserved! Please choose a different name.",
                     ephemeral=True
                 )
                 return
@@ -466,8 +488,15 @@ class SetupModal(discord.ui.Modal):
                 cfg.stats['keys_added'] = added
             
             # Create dynamic command
-            bot._create_dynamic_command(guild_id, command_name)
-            await bot.tree.sync(guild=discord.Object(id=guild_id))
+            success = await bot._create_dynamic_command(guild_id, command_name)
+            if not success:
+                await interaction.followup.send(
+                    "⚠️ Failed to create command! Please try again or use a different command name.",
+                    ephemeral=True
+                )
+                return
+            
+            # Save config first
             await bot.save_config()
             
             # Build response
@@ -688,6 +717,34 @@ async def customize(interaction: discord.Interaction):
         return
         
     await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
+
+# Add clearkeys command
+@bot.tree.command(name="clearkeys", description="🗑️ Remove all keys")
+@app_commands.default_permissions(administrator=True)
+async def clearkeys(interaction: discord.Interaction):
+    """Remove all keys"""
+    guild_id = interaction.guild.id
+    cfg = bot.config.get(guild_id)
+    
+    if not cfg:
+        await interaction.response.send_message(
+            "❌ Run /setup first!",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    
+    async with bot.locks[guild_id]:
+        key_count = len(cfg.key_store)
+        cfg.key_store.clear()
+        cfg.key_filter = ScalableBloomFilter(mode=ScalableBloomFilter.LARGE_SET_GROWTH)
+        await bot.save_config()
+    
+    await interaction.followup.send(
+        f"🗑️ Cleared {key_count} keys!",
+        ephemeral=True
+    )
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
