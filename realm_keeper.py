@@ -92,26 +92,39 @@ class RealmKeeper(commands.Bot):
     async def setup_hook(self):
         """Initialize bot systems"""
         try:
-            # Load config and sync commands
+            # Load config first
             await self.load_config()
             
-            # Clear all commands first
-            self.tree.clear_commands(guild=None)  # Clear global commands
+            # Clear all commands
+            self.tree.clear_commands(guild=None)
             
             # Add admin commands
-            admin_commands = [setup, addkeys, removekeys, loadkeys, customize]
+            admin_commands = [setup, addkeys, removekeys, loadkeys, customize, clearkeys]
             for cmd in admin_commands:
                 self.tree.add_command(cmd)
             
-            # Sync global commands
+            # Sync global commands first
             await self.tree.sync()
+            logging.info("✅ Global commands synced")
             
-            # Sync guild-specific commands
+            # Create and sync guild-specific commands
             for guild_id, cfg in self.config.items():
-                await self._create_dynamic_command(guild_id, cfg.command)
-                await self.tree.sync(guild=discord.Object(id=guild_id))
+                try:
+                    guild = self.get_guild(guild_id)
+                    if guild:
+                        # Clear old guild commands
+                        self.tree.clear_commands(guild=guild)
+                        
+                        # Create new command
+                        await self._create_dynamic_command(guild_id, cfg.command)
+                        
+                        # Sync guild commands
+                        await self.tree.sync(guild=guild)
+                        logging.info(f"✅ Synced commands for guild {guild_id}")
+                except Exception as e:
+                    logging.error(f"Failed to sync commands for guild {guild_id}: {e}")
             
-            logging.info("Realm Keeper initialized")
+            logging.info("✅ Realm Keeper initialized")
         except Exception as e:
             logging.error(f"Setup error: {e}")
             raise
@@ -144,9 +157,10 @@ class RealmKeeper(commands.Bot):
                     cfg.custom_cooldown = data.get('custom_cooldown', 300)
                     for key in data['keys']:
                         cfg.key_filter.add(key)
-                    self._create_dynamic_command(guild_id, cfg.command)
+                    # Don't create commands here, they'll be created in setup_hook
         except FileNotFoundError:
             logging.warning("No existing configuration found")
+            self.config = {}
 
     async def _create_dynamic_command(self, guild_id: int, command_name: str):
         """Create dynamic claim command for a guild"""
