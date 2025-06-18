@@ -181,6 +181,7 @@ class RealmKeeper(commands.Bot):
             
             @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
             @app_commands.guild_only()
+            @app_commands.default_permissions()
             async def claim_command(interaction: discord.Interaction):
                 """Claim your role with a key"""
                 if interaction.guild_id != guild_id:
