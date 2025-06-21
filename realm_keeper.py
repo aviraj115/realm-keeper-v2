@@ -103,37 +103,24 @@ class RealmKeeper(commands.Bot):
         self.config = dict()
         self.locks = defaultdict(asyncio.Lock)
         self.registered_commands = set()
+        # A list to hold admin commands that should be registered per-guild
+        self.guild_admin_commands = [addkeys, removekeys, loadkeys, customize, clearkeys, stats]
 
     async def setup_hook(self):
         """Initialize bot systems"""
-        try:
-            # Load config first
-            await self.load_config()
-            
-            # Clear all commands
-            self.tree.clear_commands(guild=None)
-            
-            # Add admin commands
-            admin_commands = [setup, addkeys, removekeys, loadkeys, customize, clearkeys, stats]
-            for cmd in admin_commands:
-                self.tree.add_command(cmd)
-            
-            # Sync global commands first
-            await self.tree.sync()
-            logging.info("✅ Global commands synced")
-            
-            # Create and sync guild-specific commands
-            for guild_id, cfg in self.config.items():
-                try:
-                    if guild := self.get_guild(guild_id):
-                        await self._create_dynamic_command(guild_id, cfg.command)
-                except Exception as e:
-                    logging.error(f"Failed to sync commands for guild {guild_id}: {e}")
-            
-            logging.info("✅ Realm Keeper initialized")
-        except Exception as e:
-            logging.error(f"Setup error: {e}")
-            raise
+        await self.load_config()
+
+        # Sync the single global command, /setup.
+        # All other commands are guild-specific and registered on-demand.
+        await self.tree.sync()
+        logging.info("✅ Global setup command synced.")
+
+        # Register commands for all guilds already in the config
+        for guild_id in self.config.keys():
+            if guild := self.get_guild(guild_id):
+                await self._register_commands_for_guild(guild)
+
+        logging.info("✅ Realm Keeper initialized")
 
     async def on_ready(self):
         """Called when bot is ready"""
@@ -183,40 +170,39 @@ class RealmKeeper(commands.Bot):
             logging.error("Could not decode realms.json. File might be corrupt.")
             self.config = {}
 
-    async def _create_dynamic_command(self, guild_id: int, command_name: str):
-        """Create dynamic claim command for a guild"""
-        try:
-            guild = self.get_guild(guild_id)
-            if not guild:
-                logging.error(f"Guild {guild_id} not found")
-                return False
+    async def _register_commands_for_guild(self, guild: discord.Guild):
+        """Registers all necessary commands for a specific guild."""
+        guild_id = guild.id
+        cfg = self.config.get(guild_id)
+        if not cfg:
+            logging.error(f"Config not found for guild {guild_id} during command registration.")
+            return False
 
-            # Remove any existing commands for this guild
+        try:
+            # Clear existing commands for this guild to ensure a fresh state
             self.tree.clear_commands(guild=guild)
-            
-            @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
-            @app_commands.guild_only()
-            @app_commands.default_permissions()
+
+            # Add all guild-specific admin commands
+            for cmd in self.guild_admin_commands:
+                self.tree.add_command(cmd, guild=guild)
+
+            # Create and add the dynamic public claim command
+            @app_commands.command(name=cfg.command, description="✨ Claim your role with a mystical key")
+            @app_commands.default_permissions() # Make it public for @everyone
             async def claim_command(interaction: discord.Interaction):
-                """Claim your role with a key"""
-                # This check ensures the command logic runs for the correct guild
+                # Use the guild_id from the outer scope to ensure it's the correct one
                 if interaction.guild_id != guild_id:
                     return
-                
                 await interaction.response.send_modal(ArcaneGatewayModal())
             
-            # Add command to the specific guild
             self.tree.add_command(claim_command, guild=guild)
-            
-            # Sync commands for that guild
+
+            # Sync all commands for the guild at once
             await self.tree.sync(guild=guild)
-            
-            self.registered_commands.add((guild_id, command_name))
-            logging.info(f"✅ Created command /{command_name} in guild {guild_id}")
-            
+            logging.info(f"✅ Synced {len(self.guild_admin_commands) + 1} commands for guild {guild.id}.")
             return True
         except Exception as e:
-            logging.error(f"Failed to create command '{command_name}' in guild {guild_id}: {e}")
+            logging.error(f"Failed to register/sync commands for guild {guild.id}: {e}")
             return False
 
     async def save_config(self):
@@ -420,10 +406,11 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                     else:
                         invalid += 1
             
-            success = await bot._create_dynamic_command(guild_id, command_name)
+            success = await bot._register_commands_for_guild(interaction.guild)
             if not success:
-                await interaction.followup.send("⚠️ Failed to create the slash command. Please check my permissions and try again.", ephemeral=True)
-                del bot.config[guild_id] # Clean up failed config
+                await interaction.followup.send("⚠️ Failed to create the slash commands for this server. Please check my permissions and try running `/setup` again.", ephemeral=True)
+                if guild_id in bot.config:
+                    del bot.config[guild_id] # Clean up failed config
                 return
 
             await bot.save_config()
@@ -553,6 +540,7 @@ class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
 
 # --- Admin Commands ---
 
+# The /setup command is the ONLY global command. It's the entry point for configuring a new server.
 @bot.tree.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
@@ -561,7 +549,9 @@ async def setup(interaction: discord.Interaction):
         return
     await interaction.response.send_modal(SetupModal())
 
-@bot.tree.command(name="addkeys", description="📚 Add multiple keys to the store.")
+# The following admin commands are defined but NOT registered globally.
+# They will be registered on a per-guild basis by the _register_commands_for_guild function.
+@app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
 @app_commands.default_permissions(administrator=True)
 async def addkeys(interaction: discord.Interaction):
     if interaction.guild_id not in bot.config:
@@ -569,7 +559,7 @@ async def addkeys(interaction: discord.Interaction):
         return
     await interaction.response.send_modal(BulkKeyModal())
 
-@bot.tree.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
+@app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
 @app_commands.default_permissions(administrator=True)
 async def removekeys(interaction: discord.Interaction):
     if interaction.guild_id not in bot.config:
@@ -577,7 +567,7 @@ async def removekeys(interaction: discord.Interaction):
         return
     await interaction.response.send_modal(RemoveKeysModal())
 
-@bot.tree.command(name="loadkeys", description="📤 Load keys from a text file.")
+@app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     file="The text file containing keys (one per line).",
@@ -636,7 +626,7 @@ async def loadkeys(
         ephemeral=True
     )
 
-@bot.tree.command(name="customize", description="📜 Customize the success messages for role claims.")
+@app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
 @app_commands.default_permissions(administrator=True)
 async def customize(interaction: discord.Interaction):
     guild_id = interaction.guild.id
@@ -646,7 +636,7 @@ async def customize(interaction: discord.Interaction):
         return
     await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
 
-@bot.tree.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
+@app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
 @app_commands.default_permissions(administrator=True)
 async def clearkeys(interaction: discord.Interaction):
     guild_id = interaction.guild.id
@@ -667,7 +657,7 @@ async def clearkeys(interaction: discord.Interaction):
     
     await interaction.followup.send(f"🗑️ Cleared all {key_count} keys!", ephemeral=True)
 
-@bot.tree.command(name="stats", description="📊 View statistics for this realm.")
+@app_commands.command(name="stats", description="📊 View statistics for this realm.")
 @app_commands.default_permissions(administrator=True)
 async def stats(interaction: discord.Interaction):
     guild_id = interaction.guild.id
