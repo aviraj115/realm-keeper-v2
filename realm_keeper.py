@@ -106,7 +106,6 @@ async def setup(interaction: discord.Interaction):
     if not interaction.guild.me.guild_permissions.manage_roles:
         await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
         return
-    # Note: We use interaction.client to get the bot instance inside commands.
     await interaction.response.send_modal(SetupModal())
 
 @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
@@ -267,8 +266,6 @@ class RealmKeeper(commands.Bot):
         super().__init__(command_prefix='!', intents=intents)
         self.config = dict()
         self.locks = defaultdict(asyncio.Lock)
-        # This now works because the command functions are defined before the class
-        self.guild_admin_commands = [addkeys, removekeys, loadkeys, customize, clearkeys, stats]
 
     async def setup_hook(self):
         """Initialize bot systems"""
@@ -280,9 +277,6 @@ class RealmKeeper(commands.Bot):
             self.tree.clear_commands(guild=None)
             await self.tree.sync()
             logging.info("✅ Global commands cleared.")
-
-            # Add the single global command, /setup, to the command tree.
-            self.tree.add_command(setup)
             
             # Sync to register the setup command.
             await self.tree.sync()
@@ -355,11 +349,14 @@ class RealmKeeper(commands.Bot):
             return False
 
         try:
+            # Get the command functions which are now defined in the global scope
+            admin_commands = [addkeys, removekeys, loadkeys, customize, clearkeys, stats]
+
             # Clear existing commands for this guild to ensure a fresh state
             self.tree.clear_commands(guild=guild)
 
             # Add all guild-specific admin commands
-            for cmd in self.guild_admin_commands:
+            for cmd in admin_commands:
                 self.tree.add_command(cmd, guild=guild)
 
             # Create and add the dynamic public claim command
@@ -375,7 +372,7 @@ class RealmKeeper(commands.Bot):
 
             # Sync all commands for the guild at once
             await self.tree.sync(guild=guild)
-            logging.info(f"✅ Synced {len(self.guild_admin_commands) + 1} commands for guild {guild.id}.")
+            logging.info(f"✅ Synced {len(admin_commands) + 1} commands for guild {guild.id}.")
             return True
         except Exception as e:
             logging.error(f"Failed to register/sync commands for guild {guild.id}: {e}")
@@ -604,13 +601,15 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             logging.error(f"Setup modal error: {str(e)}")
             await interaction.followup.send("💔 An unexpected error occurred during setup.", ephemeral=True)
 
-class BulkKeyModal(discord.ui.Modal, title="📚 Bulk Key Addition"):
-    keys_input = discord.ui.TextInput(
-        label="🔑 Keys",
-        style=discord.TextStyle.paragraph,
-        placeholder="Paste your keys here, one per line",
-        max_length=4000
-    )
+class BulkKeyModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="📚 Bulk Key Addition")
+        self.add_item(discord.ui.TextInput(
+            label="🔑 Keys",
+            style=discord.TextStyle.paragraph,
+            placeholder="Paste your keys here, one per line",
+            max_length=4000
+        ))
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -621,7 +620,7 @@ class BulkKeyModal(discord.ui.Modal, title="📚 Bulk Key Addition"):
             await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
             return
             
-        keys = [k.strip() for k in self.keys_input.value.split('\n') if k.strip()]
+        keys = [k.strip() for k in self.children[0].value.split('\n') if k.strip()]
         
         async with interaction.client.locks[guild_id]:
             added, invalid = 0, 0
@@ -634,13 +633,15 @@ class BulkKeyModal(discord.ui.Modal, title="📚 Bulk Key Addition"):
         
         await interaction.followup.send(f"📦 Added {added} new keys. ({invalid} were invalid or duplicates).", ephemeral=True)
 
-class RemoveKeysModal(discord.ui.Modal, title="🗑️ Remove Keys"):
-    keys_input = discord.ui.TextInput(
-        label="🔑 Keys to Remove",
-        style=discord.TextStyle.paragraph,
-        placeholder="Paste keys to remove, one per line",
-        max_length=4000
-    )
+class RemoveKeysModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="🗑️ Remove Keys")
+        self.add_item(discord.ui.TextInput(
+            label="🔑 Keys to Remove",
+            style=discord.TextStyle.paragraph,
+            placeholder="Paste keys to remove, one per line",
+            max_length=4000
+        ))
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -651,7 +652,7 @@ class RemoveKeysModal(discord.ui.Modal, title="🗑️ Remove Keys"):
             await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
             return
             
-        keys = [k.strip() for k in self.keys_input.value.split('\n') if k.strip()]
+        keys = [k.strip() for k in self.children[0].value.split('\n') if k.strip()]
         
         async with interaction.client.locks[guild_id]:
             removed, not_found = 0, 0
@@ -664,27 +665,29 @@ class RemoveKeysModal(discord.ui.Modal, title="🗑️ Remove Keys"):
         
         await interaction.followup.send(f"🗑️ Removed {removed} keys. ({not_found} were not found).", ephemeral=True)
 
-class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
-    key_input = discord.ui.TextInput(
-        label="✨ Present Your Arcane Key",
-        placeholder="Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        min_length=36,
-        max_length=36
-    )
+class ArcaneGatewayModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="🔮 Mystical Gateway")
+        self.add_item(discord.ui.TextInput(
+            label="✨ Present Your Arcane Key",
+            placeholder="Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            min_length=36,
+            max_length=36
+        ))
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.client.process_claim(interaction, self.key_input.value.strip())
+        await interaction.client.process_claim(interaction, self.children[0].value.strip())
 
-class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
-    messages_input = discord.ui.TextInput(
-        label="✨ Success Messages (one per line)",
-        style=discord.TextStyle.paragraph,
-        placeholder="Use {user} for user mention and {role} for role mention.",
-        max_length=4000
-    )
+class CustomizeModal(discord.ui.Modal):
     def __init__(self, current_messages):
-        super().__init__()
-        self.messages_input.default = "\n".join(current_messages)
+        super().__init__(title="📜 Customize Success Messages")
+        self.add_item(discord.ui.TextInput(
+            label="✨ Success Messages (one per line)",
+            style=discord.TextStyle.paragraph,
+            placeholder="Use {user} for user mention and {role} for role mention.",
+            default="\n".join(current_messages),
+            max_length=4000
+        ))
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -695,7 +698,7 @@ class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
             await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
             return
 
-        messages = [msg.strip() for msg in self.messages_input.value.split('\n') if msg.strip()]
+        messages = [msg.strip() for msg in self.children[0].value.split('\n') if msg.strip()]
         if not messages:
             await interaction.followup.send("⚠️ Please provide at least one message!", ephemeral=True)
             return
