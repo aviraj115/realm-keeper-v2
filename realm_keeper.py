@@ -272,21 +272,31 @@ class RealmKeeper(commands.Bot):
 
     async def setup_hook(self):
         """Initialize bot systems"""
-        await self.load_config()
+        try:
+            await self.load_config()
 
-        # Add the single global command, /setup, to the command tree.
-        self.tree.add_command(setup)
-        
-        # Sync all global commands (in this case, just /setup).
-        await self.tree.sync()
-        logging.info("✅ Global setup command synced.")
+            # Aggressively clear all global commands to bust the cache.
+            logging.info("Attempting to aggressively clear all global commands...")
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+            logging.info("✅ Global commands cleared.")
 
-        # Register commands for all guilds already in the config
-        for guild_id in self.config.keys():
-            if guild := self.get_guild(guild_id):
-                await self._register_commands_for_guild(guild)
+            # Add the single global command, /setup, to the command tree.
+            self.tree.add_command(setup)
+            
+            # Sync to register the setup command.
+            await self.tree.sync()
+            logging.info("✅ Global setup command synced.")
 
-        logging.info("✅ Realm Keeper initialized")
+            # Register commands for all guilds already in the config
+            for guild_id in self.config.keys():
+                if guild := self.get_guild(guild_id):
+                    await self._register_commands_for_guild(guild)
+
+            logging.info("✅ Realm Keeper initialized")
+        except Exception as e:
+            logging.error(f"A critical error occurred during bot setup: {e}")
+            raise
 
     async def on_ready(self):
         """Called when bot is ready"""
@@ -605,7 +615,7 @@ class BulkKeyModal(discord.ui.Modal, title="📚 Bulk Key Addition"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild.id
-        cfg = bot.config.get(guild_id)
+        cfg = interaction.client.config.get(guild_id)
         
         if not cfg:
             await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
@@ -613,14 +623,14 @@ class BulkKeyModal(discord.ui.Modal, title="📚 Bulk Key Addition"):
             
         keys = [k.strip() for k in self.keys_input.value.split('\n') if k.strip()]
         
-        async with bot.locks[guild_id]:
+        async with interaction.client.locks[guild_id]:
             added, invalid = 0, 0
             for key in keys:
                 if cfg.add_key(key):
                     added += 1
                 else:
                     invalid += 1
-            await bot.save_config()
+            await interaction.client.save_config()
         
         await interaction.followup.send(f"📦 Added {added} new keys. ({invalid} were invalid or duplicates).", ephemeral=True)
 
@@ -635,7 +645,7 @@ class RemoveKeysModal(discord.ui.Modal, title="🗑️ Remove Keys"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild.id
-        cfg = bot.config.get(guild_id)
+        cfg = interaction.client.config.get(guild_id)
         
         if not cfg:
             await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
@@ -643,14 +653,14 @@ class RemoveKeysModal(discord.ui.Modal, title="🗑️ Remove Keys"):
             
         keys = [k.strip() for k in self.keys_input.value.split('\n') if k.strip()]
         
-        async with bot.locks[guild_id]:
+        async with interaction.client.locks[guild_id]:
             removed, not_found = 0, 0
             for key in keys:
                 if cfg.remove_key(key):
                     removed += 1
                 else:
                     not_found += 1
-            await bot.save_config()
+            await interaction.client.save_config()
         
         await interaction.followup.send(f"🗑️ Removed {removed} keys. ({not_found} were not found).", ephemeral=True)
 
@@ -663,7 +673,7 @@ class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await bot.process_claim(interaction, self.key_input.value.strip())
+        await interaction.client.process_claim(interaction, self.key_input.value.strip())
 
 class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
     messages_input = discord.ui.TextInput(
@@ -679,7 +689,7 @@ class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild.id
-        cfg = bot.config.get(guild_id)
+        cfg = interaction.client.config.get(guild_id)
         
         if not cfg:
             await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
@@ -700,7 +710,7 @@ class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
             return
         
         cfg.success_msgs = messages
-        await bot.save_config()
+        await interaction.client.save_config()
         
         await interaction.followup.send(f"✨ Success messages updated! There are now {len(messages)} unique messages.", ephemeral=True)
 
