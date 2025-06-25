@@ -95,6 +95,171 @@ class GuildConfig:
         except ValueError:
             return False
 
+# --- Command Definitions ---
+# All commands are defined here as standalone functions before the bot class
+# so that the bot class can refer to them during initialization.
+
+@app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
+@app_commands.default_permissions(administrator=True)
+async def setup(interaction: discord.Interaction):
+    """The entry point for configuring a new server."""
+    if not interaction.guild.me.guild_permissions.manage_roles:
+        await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
+        return
+    # Note: We use interaction.client to get the bot instance inside commands.
+    await interaction.response.send_modal(SetupModal())
+
+@app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
+@app_commands.default_permissions(administrator=True)
+async def addkeys(interaction: discord.Interaction):
+    if interaction.guild_id not in interaction.client.config:
+        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+        return
+    await interaction.response.send_modal(BulkKeyModal())
+
+@app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
+@app_commands.default_permissions(administrator=True)
+async def removekeys(interaction: discord.Interaction):
+    if interaction.guild_id not in interaction.client.config:
+        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+        return
+    await interaction.response.send_modal(RemoveKeysModal())
+
+@app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    file="The text file containing keys (one per line).",
+    overwrite="Select True to remove all existing keys before adding new ones."
+)
+async def loadkeys(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    overwrite: bool = False
+):
+    await interaction.response.defer(ephemeral=True)
+    guild_id = interaction.guild.id
+    cfg = interaction.client.config.get(guild_id)
+    
+    if not cfg:
+        await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
+        return
+
+    if not file.filename.endswith('.txt'):
+        await interaction.followup.send("📄 Invalid file type! Please upload a `.txt` file.", ephemeral=True)
+        return
+
+    if file.size > 2 * 1024 * 1024:  # 2MB limit
+        await interaction.followup.send("⚖️ File is too large (max 2MB).", ephemeral=True)
+        return
+    
+    try:
+        content = await file.read()
+        keys = [k.strip() for k in content.decode('utf-8').split('\n') if k.strip()]
+    except Exception as e:
+        logging.error(f"File read error: {e}")
+        await interaction.followup.send("💥 Failed to read the file content.", ephemeral=True)
+        return
+
+    async with interaction.client.locks[guild_id]:
+        if overwrite:
+            key_count = len(cfg.key_store)
+            cfg.key_store.clear()
+            cfg.key_filter = ScalableBloomFilter(mode=ScalableBloomFilter.LARGE_SET_GROWTH)
+            cfg.stats['keys_removed'] += key_count
+            logging.info(f"Cleared {key_count} keys for overwrite in guild {guild_id}.")
+
+        added, invalid = 0, 0
+        for key in keys:
+            if cfg.add_key(key):
+                added += 1
+            else:
+                invalid += 1
+        
+        await interaction.client.save_config()
+
+    await interaction.followup.send(
+        f"📦 Load complete. Added {added} new keys. "
+        f"({invalid} were invalid or duplicates). "
+        f"{'All previous keys were cleared.' if overwrite else ''}",
+        ephemeral=True
+    )
+
+@app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
+@app_commands.default_permissions(administrator=True)
+async def customize(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    cfg = interaction.client.config.get(guild_id)
+    if not cfg:
+        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+        return
+    await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
+
+@app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
+@app_commands.default_permissions(administrator=True)
+async def clearkeys(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    cfg = interaction.client.config.get(guild_id)
+    if not cfg:
+        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    
+    async with interaction.client.locks[guild_id]:
+        key_count = len(cfg.key_store)
+        cfg.key_store.clear()
+        cfg.key_filter = ScalableBloomFilter(mode=ScalableBloomFilter.LARGE_SET_GROWTH)
+        cfg.stats['keys_removed'] += key_count
+        cfg.stats['total_keys'] = 0
+        await interaction.client.save_config()
+    
+    await interaction.followup.send(f"🗑️ Cleared all {key_count} keys!", ephemeral=True)
+
+@app_commands.command(name="stats", description="📊 View statistics for this realm.")
+@app_commands.default_permissions(administrator=True)
+async def stats(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    cfg = interaction.client.config.get(guild_id)
+    
+    if not cfg:
+        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+        return
+
+    role = interaction.guild.get_role(cfg.role_id)
+    
+    stats_embed = discord.Embed(
+        title=f"📊 Statistics for {interaction.guild.name}",
+        description=f"Tracking the `{cfg.command}` command for the {role.mention if role else 'Unknown Role'}.",
+        color=discord.Color.blue()
+    )
+    
+    stats_embed.add_field(
+        name="🔑 Key Inventory",
+        value=f"**Available:** {cfg.stats['total_keys']}\n"
+              f"**Total Added:** {cfg.stats['keys_added']}\n"
+              f"**Total Used/Removed:** {cfg.stats['keys_removed']}",
+        inline=True
+    )
+    
+    stats_embed.add_field(
+        name="✨ Claim Activity",
+        value=f"**Successful:** {cfg.stats['successful_claims']}\n"
+              f"**Failed:** {cfg.stats['failed_claims']}",
+        inline=True
+    )
+
+    last_claim = cfg.stats.get('last_claim_time', 0)
+    last_claim_str = f"<t:{last_claim}:R>" if last_claim > 0 else "Never"
+    stats_embed.add_field(
+        name="⌛ Last Successful Claim",
+        value=last_claim_str,
+        inline=False
+    )
+    
+    stats_embed.set_footer(text=f"Realm Keeper | Guild ID: {guild_id}")
+    
+    await interaction.response.send_message(embed=stats_embed, ephemeral=True)
+
 class RealmKeeper(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -102,16 +267,17 @@ class RealmKeeper(commands.Bot):
         super().__init__(command_prefix='!', intents=intents)
         self.config = dict()
         self.locks = defaultdict(asyncio.Lock)
-        self.registered_commands = set()
-        # A list to hold admin commands that should be registered per-guild
+        # This now works because the command functions are defined before the class
         self.guild_admin_commands = [addkeys, removekeys, loadkeys, customize, clearkeys, stats]
 
     async def setup_hook(self):
         """Initialize bot systems"""
         await self.load_config()
 
-        # Sync the single global command, /setup.
-        # All other commands are guild-specific and registered on-demand.
+        # Add the single global command, /setup, to the command tree.
+        self.tree.add_command(setup)
+        
+        # Sync all global commands (in this case, just /setup).
         await self.tree.sync()
         logging.info("✅ Global setup command synced.")
 
@@ -537,170 +703,6 @@ class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
         await bot.save_config()
         
         await interaction.followup.send(f"✨ Success messages updated! There are now {len(messages)} unique messages.", ephemeral=True)
-
-# --- Admin Commands ---
-
-# The /setup command is the ONLY global command. It's the entry point for configuring a new server.
-@bot.tree.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
-@app_commands.default_permissions(administrator=True)
-async def setup(interaction: discord.Interaction):
-    if not interaction.guild.me.guild_permissions.manage_roles:
-        await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
-        return
-    await interaction.response.send_modal(SetupModal())
-
-# The following admin commands are defined but NOT registered globally.
-# They will be registered on a per-guild basis by the _register_commands_for_guild function.
-@app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
-@app_commands.default_permissions(administrator=True)
-async def addkeys(interaction: discord.Interaction):
-    if interaction.guild_id not in bot.config:
-        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
-        return
-    await interaction.response.send_modal(BulkKeyModal())
-
-@app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
-@app_commands.default_permissions(administrator=True)
-async def removekeys(interaction: discord.Interaction):
-    if interaction.guild_id not in bot.config:
-        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
-        return
-    await interaction.response.send_modal(RemoveKeysModal())
-
-@app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(
-    file="The text file containing keys (one per line).",
-    overwrite="Select True to remove all existing keys before adding new ones."
-)
-async def loadkeys(
-    interaction: discord.Interaction,
-    file: discord.Attachment,
-    overwrite: bool = False
-):
-    await interaction.response.defer(ephemeral=True)
-    guild_id = interaction.guild.id
-    cfg = bot.config.get(guild_id)
-    
-    if not cfg:
-        await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
-        return
-
-    if not file.filename.endswith('.txt'):
-        await interaction.followup.send("📄 Invalid file type! Please upload a `.txt` file.", ephemeral=True)
-        return
-
-    if file.size > 2 * 1024 * 1024:  # 2MB limit
-        await interaction.followup.send("⚖️ File is too large (max 2MB).", ephemeral=True)
-        return
-    
-    try:
-        content = await file.read()
-        keys = [k.strip() for k in content.decode('utf-8').split('\n') if k.strip()]
-    except Exception as e:
-        logging.error(f"File read error: {e}")
-        await interaction.followup.send("💥 Failed to read the file content.", ephemeral=True)
-        return
-
-    async with bot.locks[guild_id]:
-        if overwrite:
-            key_count = len(cfg.key_store)
-            cfg.key_store.clear()
-            cfg.key_filter = ScalableBloomFilter(mode=ScalableBloomFilter.LARGE_SET_GROWTH)
-            cfg.stats['keys_removed'] += key_count
-            logging.info(f"Cleared {key_count} keys for overwrite in guild {guild_id}.")
-
-        added, invalid = 0, 0
-        for key in keys:
-            if cfg.add_key(key):
-                added += 1
-            else:
-                invalid += 1
-        
-        await bot.save_config()
-
-    await interaction.followup.send(
-        f"📦 Load complete. Added {added} new keys. "
-        f"({invalid} were invalid or duplicates). "
-        f"{'All previous keys were cleared.' if overwrite else ''}",
-        ephemeral=True
-    )
-
-@app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
-@app_commands.default_permissions(administrator=True)
-async def customize(interaction: discord.Interaction):
-    guild_id = interaction.guild.id
-    cfg = bot.config.get(guild_id)
-    if not cfg:
-        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
-        return
-    await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
-
-@app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
-@app_commands.default_permissions(administrator=True)
-async def clearkeys(interaction: discord.Interaction):
-    guild_id = interaction.guild.id
-    cfg = bot.config.get(guild_id)
-    if not cfg:
-        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-    
-    async with bot.locks[guild_id]:
-        key_count = len(cfg.key_store)
-        cfg.key_store.clear()
-        cfg.key_filter = ScalableBloomFilter(mode=ScalableBloomFilter.LARGE_SET_GROWTH)
-        cfg.stats['keys_removed'] += key_count
-        cfg.stats['total_keys'] = 0
-        await bot.save_config()
-    
-    await interaction.followup.send(f"🗑️ Cleared all {key_count} keys!", ephemeral=True)
-
-@app_commands.command(name="stats", description="📊 View statistics for this realm.")
-@app_commands.default_permissions(administrator=True)
-async def stats(interaction: discord.Interaction):
-    guild_id = interaction.guild.id
-    cfg = bot.config.get(guild_id)
-    
-    if not cfg:
-        await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
-        return
-
-    role = interaction.guild.get_role(cfg.role_id)
-    
-    stats_embed = discord.Embed(
-        title=f"📊 Statistics for {interaction.guild.name}",
-        description=f"Tracking the `{cfg.command}` command for the {role.mention if role else 'Unknown Role'}.",
-        color=discord.Color.blue()
-    )
-    
-    stats_embed.add_field(
-        name="🔑 Key Inventory",
-        value=f"**Available:** {cfg.stats['total_keys']}\n"
-              f"**Total Added:** {cfg.stats['keys_added']}\n"
-              f"**Total Used/Removed:** {cfg.stats['keys_removed']}",
-        inline=True
-    )
-    
-    stats_embed.add_field(
-        name="✨ Claim Activity",
-        value=f"**Successful:** {cfg.stats['successful_claims']}\n"
-              f"**Failed:** {cfg.stats['failed_claims']}",
-        inline=True
-    )
-
-    last_claim = cfg.stats.get('last_claim_time', 0)
-    last_claim_str = f"<t:{last_claim}:R>" if last_claim > 0 else "Never"
-    stats_embed.add_field(
-        name="⌛ Last Successful Claim",
-        value=last_claim_str,
-        inline=False
-    )
-    
-    stats_embed.set_footer(text=f"Realm Keeper | Guild ID: {guild_id}")
-    
-    await interaction.response.send_message(embed=stats_embed, ephemeral=True)
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
