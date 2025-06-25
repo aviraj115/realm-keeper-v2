@@ -562,14 +562,14 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 return
             
             command_name = self.command_name_input.value.strip().lower()
-            reserved_names = [cmd.name for cmd in bot.tree.get_commands()]
+            reserved_names = [cmd.name for cmd in interaction.client.tree.get_commands()]
             if command_name in reserved_names:
                 await interaction.followup.send(f"⚠️ Command name `/{command_name}` is reserved! Choose another.", ephemeral=True)
                 return
             
             guild_id = interaction.guild.id
-            bot.config[guild_id] = GuildConfig(role.id)
-            cfg = bot.config[guild_id]
+            interaction.client.config[guild_id] = GuildConfig(role.id)
+            cfg = interaction.client.config[guild_id]
             cfg.command = command_name
             
             added, invalid = 0, 0
@@ -582,14 +582,14 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                     else:
                         invalid += 1
             
-            success = await bot._register_commands_for_guild(interaction.guild)
+            success = await interaction.client._register_commands_for_guild(interaction.guild)
             if not success:
                 await interaction.followup.send("⚠️ Failed to create the slash commands for this server. Please check my permissions and try running `/setup` again.", ephemeral=True)
-                if guild_id in bot.config:
-                    del bot.config[guild_id] # Clean up failed config
+                if guild_id in interaction.client.config:
+                    del interaction.client.config[guild_id] # Clean up failed config
                 return
 
-            await bot.save_config()
+            await interaction.client.save_config()
 
             response = [
                 f"✨ Realm initialized for {role.mention}!",
