@@ -95,14 +95,204 @@ class GuildConfig:
         except ValueError:
             return False
 
-# --- Command Definitions ---
-# All commands are defined here as standalone functions before the bot class
-# so that the bot class can refer to them during initialization.
+# --- Modals ---
+# Placed before the Bot class because they are used by command functions,
+# which are then referenced by the Bot class.
+class ArcaneGatewayModal(discord.ui.Modal, title="🔮 Mystical Gateway"):
+    key_input = discord.ui.TextInput(
+        label="✨ Present Your Arcane Key",
+        placeholder="Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        min_length=36,
+        max_length=36
+    )
 
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.client.process_claim(interaction, self.key_input.value.strip())
+
+class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
+    role_name_input = discord.ui.TextInput(
+        label="✨ Role Name",
+        placeholder="Enter the exact role name to grant",
+        min_length=1,
+        max_length=100
+    )
+    command_name_input = discord.ui.TextInput(
+        label="🔮 Command Name",
+        placeholder="e.g., claim, verify, redeem (no slash)",
+        default="claim",
+        min_length=1,
+        max_length=32
+    )
+    initial_keys_input = discord.ui.TextInput(
+        label="📜 Initial Keys (Optional)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Add initial keys here, one per line",
+        required=False,
+        max_length=4000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            bot = interaction.client # Use interaction.client to get the bot instance
+            
+            role_name = self.role_name_input.value.strip()
+            role = discord.utils.get(interaction.guild.roles, name=role_name)
+            
+            if not role:
+                await interaction.followup.send(f"❌ Role '{role_name}' not found! Please enter the exact name (case-sensitive).", ephemeral=True)
+                return
+            
+            command_name = self.command_name_input.value.strip().lower()
+            reserved_names = [cmd.name for cmd in bot.tree.get_commands()]
+            if command_name in reserved_names:
+                await interaction.followup.send(f"⚠️ Command name `/{command_name}` is reserved! Choose another.", ephemeral=True)
+                return
+            
+            guild_id = interaction.guild.id
+            bot.config[guild_id] = GuildConfig(role.id)
+            cfg = bot.config[guild_id]
+            cfg.command = command_name
+            
+            added, invalid = 0, 0
+            initial_keys = self.initial_keys_input.value.strip()
+            if initial_keys:
+                keys = [k.strip() for k in initial_keys.split('\n') if k.strip()]
+                for key in keys:
+                    if cfg.add_key(key):
+                        added += 1
+                    else:
+                        invalid += 1
+            
+            success = await bot._create_dynamic_command(guild_id, command_name)
+            if not success:
+                await interaction.followup.send("⚠️ Failed to create the slash command. Please check my permissions and try again.", ephemeral=True)
+                if guild_id in bot.config:
+                    del bot.config[guild_id] # Clean up failed config
+                return
+
+            await bot.save_config()
+
+            response = [
+                f"✨ Realm initialized for {role.mention}!",
+                f"Use `/{command_name}` to claim the role.",
+                "⚠️ It may take a minute for Discord to show the new command."
+            ]
+            if initial_keys:
+                response.append(f"\n📦 Loaded {added} initial keys ({invalid} were invalid or duplicates).")
+            
+            await interaction.followup.send("\n".join(response), ephemeral=True)
+        except Exception as e:
+            logging.error(f"Setup modal error: {str(e)}")
+            await interaction.followup.send("💔 An unexpected error occurred during setup.", ephemeral=True)
+
+class BulkKeyModal(discord.ui.Modal, title="📚 Bulk Key Addition"):
+    keys_input = discord.ui.TextInput(
+        label="🔑 Keys",
+        style=discord.TextStyle.paragraph,
+        placeholder="Paste your keys here, one per line",
+        max_length=4000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild_id = interaction.guild.id
+        bot = interaction.client
+        cfg = bot.config.get(guild_id)
+        
+        if not cfg:
+            await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
+            return
+            
+        keys = [k.strip() for k in self.keys_input.value.split('\n') if k.strip()]
+        
+        async with bot.locks[guild_id]:
+            added, invalid = 0, 0
+            for key in keys:
+                if cfg.add_key(key):
+                    added += 1
+                else:
+                    invalid += 1
+            await bot.save_config()
+        
+        await interaction.followup.send(f"📦 Added {added} new keys. ({invalid} were invalid or duplicates).", ephemeral=True)
+
+class RemoveKeysModal(discord.ui.Modal, title="🗑️ Remove Keys"):
+    keys_input = discord.ui.TextInput(
+        label="🔑 Keys to Remove",
+        style=discord.TextStyle.paragraph,
+        placeholder="Paste keys to remove, one per line",
+        max_length=4000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild_id = interaction.guild.id
+        bot = interaction.client
+        cfg = bot.config.get(guild_id)
+        
+        if not cfg:
+            await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
+            return
+            
+        keys = [k.strip() for k in self.keys_input.value.split('\n') if k.strip()]
+        
+        async with bot.locks[guild_id]:
+            removed, not_found = 0, 0
+            for key in keys:
+                if cfg.remove_key(key):
+                    removed += 1
+                else:
+                    not_found += 1
+            await bot.save_config()
+        
+        await interaction.followup.send(f"🗑️ Removed {removed} keys. ({not_found} were not found).", ephemeral=True)
+
+class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
+    messages_input = discord.ui.TextInput(
+        label="✨ Success Messages (one per line)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Use {user} for user mention and {role} for role mention.",
+        max_length=4000
+    )
+    def __init__(self, current_messages):
+        super().__init__()
+        self.messages_input.default = "\n".join(current_messages)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild_id = interaction.guild.id
+        bot = interaction.client
+        cfg = bot.config.get(guild_id)
+        
+        if not cfg:
+            await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
+            return
+
+        messages = [msg.strip() for msg in self.messages_input.value.split('\n') if msg.strip()]
+        if not messages:
+            await interaction.followup.send("⚠️ Please provide at least one message!", ephemeral=True)
+            return
+        
+        invalid_msgs = [msg for msg in messages if "{user}" not in msg or "{role}" not in msg]
+        if invalid_msgs:
+            await interaction.followup.send(
+                "⚠️ Some messages are missing `{user}` or `{role}` placeholders:\n" +
+                "\n".join(f"• `{msg}`" for msg in invalid_msgs[:3]),
+                ephemeral=True
+            )
+            return
+        
+        cfg.success_msgs = messages
+        await bot.save_config()
+        
+        await interaction.followup.send(f"✨ Success messages updated! There are now {len(messages)} unique messages.", ephemeral=True)
+
+# --- Command Functions ---
+# These are defined before the Bot class so they can be referenced during its initialization.
 @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
-    """The entry point for configuring a new server."""
     if not interaction.guild.me.guild_permissions.manage_roles:
         await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
         return
@@ -137,7 +327,8 @@ async def loadkeys(
 ):
     await interaction.response.defer(ephemeral=True)
     guild_id = interaction.guild.id
-    cfg = interaction.client.config.get(guild_id)
+    bot = interaction.client
+    cfg = bot.config.get(guild_id)
     
     if not cfg:
         await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
@@ -159,7 +350,7 @@ async def loadkeys(
         await interaction.followup.send("💥 Failed to read the file content.", ephemeral=True)
         return
 
-    async with interaction.client.locks[guild_id]:
+    async with bot.locks[guild_id]:
         if overwrite:
             key_count = len(cfg.key_store)
             cfg.key_store.clear()
@@ -174,7 +365,7 @@ async def loadkeys(
             else:
                 invalid += 1
         
-        await interaction.client.save_config()
+        await bot.save_config()
 
     await interaction.followup.send(
         f"📦 Load complete. Added {added} new keys. "
@@ -187,7 +378,8 @@ async def loadkeys(
 @app_commands.default_permissions(administrator=True)
 async def customize(interaction: discord.Interaction):
     guild_id = interaction.guild.id
-    cfg = interaction.client.config.get(guild_id)
+    bot = interaction.client
+    cfg = bot.config.get(guild_id)
     if not cfg:
         await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
         return
@@ -197,20 +389,21 @@ async def customize(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def clearkeys(interaction: discord.Interaction):
     guild_id = interaction.guild.id
-    cfg = interaction.client.config.get(guild_id)
+    bot = interaction.client
+    cfg = bot.config.get(guild_id)
     if not cfg:
         await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
     
-    async with interaction.client.locks[guild_id]:
+    async with bot.locks[guild_id]:
         key_count = len(cfg.key_store)
         cfg.key_store.clear()
         cfg.key_filter = ScalableBloomFilter(mode=ScalableBloomFilter.LARGE_SET_GROWTH)
         cfg.stats['keys_removed'] += key_count
         cfg.stats['total_keys'] = 0
-        await interaction.client.save_config()
+        await bot.save_config()
     
     await interaction.followup.send(f"🗑️ Cleared all {key_count} keys!", ephemeral=True)
 
@@ -218,7 +411,8 @@ async def clearkeys(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def stats(interaction: discord.Interaction):
     guild_id = interaction.guild.id
-    cfg = interaction.client.config.get(guild_id)
+    bot = interaction.client
+    cfg = bot.config.get(guild_id)
     
     if not cfg:
         await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
@@ -266,36 +460,37 @@ class RealmKeeper(commands.Bot):
         super().__init__(command_prefix='!', intents=intents)
         self.config = dict()
         self.locks = defaultdict(asyncio.Lock)
+        self.registered_commands = set()
+        
+        # This list of commands is now defined before the class, so this works.
+        self.admin_commands = [setup, addkeys, removekeys, loadkeys, customize, clearkeys, stats]
 
     async def setup_hook(self):
         """Initialize bot systems"""
         try:
             await self.load_config()
-
-            # Aggressively clear all global commands to bust the cache.
-            logging.info("Attempting to aggressively clear all global commands...")
-            self.tree.clear_commands(guild=None)
-            await self.tree.sync()
-            logging.info("✅ Global commands cleared.")
             
-            # Sync to register the setup command.
+            # Add all commands to the tree
+            for cmd in self.admin_commands:
+                self.tree.add_command(cmd)
+            
+            # Sync global commands
             await self.tree.sync()
-            logging.info("✅ Global setup command synced.")
-
-            # Register commands for all guilds already in the config
-            for guild_id in self.config.keys():
-                if guild := self.get_guild(guild_id):
-                    await self._register_commands_for_guild(guild)
-
+            logging.info("✅ Global commands synced")
+            
+            # Create and sync guild-specific commands for existing configs
+            for guild_id, cfg in self.config.items():
+                if self.get_guild(guild_id):
+                    await self._create_dynamic_command(guild_id, cfg.command)
+            
             logging.info("✅ Realm Keeper initialized")
         except Exception as e:
-            logging.error(f"A critical error occurred during bot setup: {e}")
+            logging.error(f"Setup error: {e}")
             raise
 
     async def on_ready(self):
         """Called when bot is ready"""
         try:
-            # Set custom activity
             activity = discord.Activity(
                 type=discord.ActivityType.watching,
                 name="for ✨ mystical keys"
@@ -309,7 +504,6 @@ class RealmKeeper(commands.Bot):
     async def load_config(self):
         """
         Loads configuration from realms.json.
-        This corrected version now properly loads the 'stats' dictionary.
         """
         try:
             with open('realms.json') as f:
@@ -323,12 +517,9 @@ class RealmKeeper(commands.Bot):
                     cfg.success_msgs = data.get('success_msgs', DRAMATIC_MESSAGES.copy())
                     cfg.custom_cooldown = data.get('custom_cooldown', 300)
                     
-                    # --- BUG FIX: Load saved stats ---
-                    # Update the default stats dict with the loaded stats
                     saved_stats = data.get('stats', {})
                     if saved_stats:
                         cfg.stats.update(saved_stats)
-                    # Ensure total_keys is accurate on load
                     cfg.stats['total_keys'] = len(cfg.key_store)
                     
                     for key in cfg.key_store:
@@ -340,48 +531,42 @@ class RealmKeeper(commands.Bot):
             logging.error("Could not decode realms.json. File might be corrupt.")
             self.config = {}
 
-    async def _register_commands_for_guild(self, guild: discord.Guild):
-        """Registers all necessary commands for a specific guild."""
-        guild_id = guild.id
-        cfg = self.config.get(guild_id)
-        if not cfg:
-            logging.error(f"Config not found for guild {guild_id} during command registration.")
-            return False
-
+    async def _create_dynamic_command(self, guild_id: int, command_name: str):
+        """Create dynamic claim command for a guild"""
         try:
-            # Get the command functions which are now defined in the global scope
-            admin_commands = [addkeys, removekeys, loadkeys, customize, clearkeys, stats]
-
-            # Clear existing commands for this guild to ensure a fresh state
+            guild = self.get_guild(guild_id)
+            if not guild:
+                logging.error(f"Guild {guild_id} not found")
+                return False
+            
+            # Since admin commands are global, we only need to manage the one dynamic command here.
+            # We clear guild commands to ensure no old dynamic commands are left over.
             self.tree.clear_commands(guild=guild)
-
-            # Add all guild-specific admin commands
-            for cmd in admin_commands:
-                self.tree.add_command(cmd, guild=guild)
-
-            # Create and add the dynamic public claim command
-            @app_commands.command(name=cfg.command, description="✨ Claim your role with a mystical key")
-            @app_commands.default_permissions() # Make it public for @everyone
+            
+            @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
+            @app_commands.guild_only()
+            @app_commands.default_permissions() # This is the key to making it visible to @everyone
             async def claim_command(interaction: discord.Interaction):
-                # Use the guild_id from the outer scope to ensure it's the correct one
+                """Claim your role with a key"""
                 if interaction.guild_id != guild_id:
                     return
+                
                 await interaction.response.send_modal(ArcaneGatewayModal())
             
             self.tree.add_command(claim_command, guild=guild)
-
-            # Sync all commands for the guild at once
             await self.tree.sync(guild=guild)
-            logging.info(f"✅ Synced {len(admin_commands) + 1} commands for guild {guild.id}.")
+            
+            self.registered_commands.add((guild_id, command_name))
+            logging.info(f"✅ Created command /{command_name} in guild {guild_id}")
+            
             return True
         except Exception as e:
-            logging.error(f"Failed to register/sync commands for guild {guild.id}: {e}")
+            logging.error(f"Failed to create command '{command_name}' in guild {guild_id}: {e}")
             return False
 
     async def save_config(self):
         """
         Saves the current configuration to realms.json.
-        This corrected version now properly saves the 'stats' dictionary.
         """
         data = {
             str(gid): {
@@ -390,7 +575,6 @@ class RealmKeeper(commands.Bot):
                 'keys': list(cfg.key_store),
                 'success_msgs': cfg.success_msgs,
                 'custom_cooldown': cfg.custom_cooldown,
-                # --- BUG FIX: Save the stats dictionary ---
                 'stats': cfg.stats
             }
             for gid, cfg in self.config.items()
@@ -522,200 +706,6 @@ class RealmKeeper(commands.Bot):
                 pass # Already responded, can't send again
 
 bot = RealmKeeper()
-
-# --- Modals ---
-
-class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
-    role_name_input = discord.ui.TextInput(
-        label="✨ Role Name",
-        placeholder="Enter the exact role name to grant",
-        min_length=1,
-        max_length=100
-    )
-    command_name_input = discord.ui.TextInput(
-        label="🔮 Command Name",
-        placeholder="e.g., claim, verify, redeem (no slash)",
-        default="claim",
-        min_length=1,
-        max_length=32
-    )
-    initial_keys_input = discord.ui.TextInput(
-        label="📜 Initial Keys (Optional)",
-        style=discord.TextStyle.paragraph,
-        placeholder="Add initial keys here, one per line",
-        required=False,
-        max_length=4000
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            await interaction.response.defer(ephemeral=True)
-            
-            role_name = self.role_name_input.value.strip()
-            role = discord.utils.get(interaction.guild.roles, name=role_name)
-            
-            if not role:
-                await interaction.followup.send(f"❌ Role '{role_name}' not found! Please enter the exact name (case-sensitive).", ephemeral=True)
-                return
-            
-            command_name = self.command_name_input.value.strip().lower()
-            reserved_names = [cmd.name for cmd in interaction.client.tree.get_commands()]
-            if command_name in reserved_names:
-                await interaction.followup.send(f"⚠️ Command name `/{command_name}` is reserved! Choose another.", ephemeral=True)
-                return
-            
-            guild_id = interaction.guild.id
-            interaction.client.config[guild_id] = GuildConfig(role.id)
-            cfg = interaction.client.config[guild_id]
-            cfg.command = command_name
-            
-            added, invalid = 0, 0
-            initial_keys = self.initial_keys_input.value.strip()
-            if initial_keys:
-                keys = [k.strip() for k in initial_keys.split('\n') if k.strip()]
-                for key in keys:
-                    if cfg.add_key(key):
-                        added += 1
-                    else:
-                        invalid += 1
-            
-            success = await interaction.client._register_commands_for_guild(interaction.guild)
-            if not success:
-                await interaction.followup.send("⚠️ Failed to create the slash commands for this server. Please check my permissions and try running `/setup` again.", ephemeral=True)
-                if guild_id in interaction.client.config:
-                    del interaction.client.config[guild_id] # Clean up failed config
-                return
-
-            await interaction.client.save_config()
-
-            response = [
-                f"✨ Realm initialized for {role.mention}!",
-                f"Use `/{command_name}` to claim the role.",
-                "⚠️ It may take a minute for Discord to show the new command."
-            ]
-            if initial_keys:
-                response.append(f"\n📦 Loaded {added} initial keys ({invalid} were invalid or duplicates).")
-            
-            await interaction.followup.send("\n".join(response), ephemeral=True)
-        except Exception as e:
-            logging.error(f"Setup modal error: {str(e)}")
-            await interaction.followup.send("💔 An unexpected error occurred during setup.", ephemeral=True)
-
-class BulkKeyModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="📚 Bulk Key Addition")
-        self.add_item(discord.ui.TextInput(
-            label="🔑 Keys",
-            style=discord.TextStyle.paragraph,
-            placeholder="Paste your keys here, one per line",
-            max_length=4000
-        ))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        guild_id = interaction.guild.id
-        cfg = interaction.client.config.get(guild_id)
-        
-        if not cfg:
-            await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
-            return
-            
-        keys = [k.strip() for k in self.children[0].value.split('\n') if k.strip()]
-        
-        async with interaction.client.locks[guild_id]:
-            added, invalid = 0, 0
-            for key in keys:
-                if cfg.add_key(key):
-                    added += 1
-                else:
-                    invalid += 1
-            await interaction.client.save_config()
-        
-        await interaction.followup.send(f"📦 Added {added} new keys. ({invalid} were invalid or duplicates).", ephemeral=True)
-
-class RemoveKeysModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="🗑️ Remove Keys")
-        self.add_item(discord.ui.TextInput(
-            label="🔑 Keys to Remove",
-            style=discord.TextStyle.paragraph,
-            placeholder="Paste keys to remove, one per line",
-            max_length=4000
-        ))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        guild_id = interaction.guild.id
-        cfg = interaction.client.config.get(guild_id)
-        
-        if not cfg:
-            await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
-            return
-            
-        keys = [k.strip() for k in self.children[0].value.split('\n') if k.strip()]
-        
-        async with interaction.client.locks[guild_id]:
-            removed, not_found = 0, 0
-            for key in keys:
-                if cfg.remove_key(key):
-                    removed += 1
-                else:
-                    not_found += 1
-            await interaction.client.save_config()
-        
-        await interaction.followup.send(f"🗑️ Removed {removed} keys. ({not_found} were not found).", ephemeral=True)
-
-class ArcaneGatewayModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="🔮 Mystical Gateway")
-        self.add_item(discord.ui.TextInput(
-            label="✨ Present Your Arcane Key",
-            placeholder="Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-            min_length=36,
-            max_length=36
-        ))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.client.process_claim(interaction, self.children[0].value.strip())
-
-class CustomizeModal(discord.ui.Modal):
-    def __init__(self, current_messages):
-        super().__init__(title="📜 Customize Success Messages")
-        self.add_item(discord.ui.TextInput(
-            label="✨ Success Messages (one per line)",
-            style=discord.TextStyle.paragraph,
-            placeholder="Use {user} for user mention and {role} for role mention.",
-            default="\n".join(current_messages),
-            max_length=4000
-        ))
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        guild_id = interaction.guild.id
-        cfg = interaction.client.config.get(guild_id)
-        
-        if not cfg:
-            await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
-            return
-
-        messages = [msg.strip() for msg in self.children[0].value.split('\n') if msg.strip()]
-        if not messages:
-            await interaction.followup.send("⚠️ Please provide at least one message!", ephemeral=True)
-            return
-        
-        invalid_msgs = [msg for msg in messages if "{user}" not in msg or "{role}" not in msg]
-        if invalid_msgs:
-            await interaction.followup.send(
-                "⚠️ Some messages are missing `{user}` or `{role}` placeholders:\n" +
-                "\n".join(f"• `{msg}`" for msg in invalid_msgs[:3]),
-                ephemeral=True
-            )
-            return
-        
-        cfg.success_msgs = messages
-        await interaction.client.save_config()
-        
-        await interaction.followup.send(f"✨ Success messages updated! There are now {len(messages)} unique messages.", ephemeral=True)
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
