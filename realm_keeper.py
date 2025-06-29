@@ -300,10 +300,25 @@ class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
 # These are defined before the Bot class so they can be referenced during its initialization.
 
 async def _setup_callback(interaction: discord.Interaction):
-    if not interaction.guild.me.guild_permissions.manage_roles:
-        await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
-        return
-    await interaction.response.send_modal(SetupModal())
+    logging.info(f"Attempting to execute /setup for user {interaction.user.id} in guild {interaction.guild.id}.")
+    try:
+        if not interaction.guild.me.guild_permissions.manage_roles:
+            logging.warning(f"Bot lacks 'Manage Roles' permission in guild {interaction.guild.id}. Responding to user.")
+            await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
+            return
+        
+        logging.info(f"Bot has 'Manage Roles' permission. Preparing to send SetupModal to user {interaction.user.id}.")
+        await interaction.response.send_modal(SetupModal())
+        logging.info(f"Successfully sent SetupModal to user {interaction.user.id}.")
+
+    except Exception as e:
+        logging.error(f"An error occurred within the /setup callback: {e}", exc_info=True)
+        # Attempt to send a failure message if no response has been sent yet
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.send_message("💔 An unexpected error occurred while processing the command.", ephemeral=True)
+            except Exception as followup_e:
+                logging.error(f"Failed to send error message to user after initial callback failure: {followup_e}")
 
 async def _addkeys_callback(interaction: discord.Interaction):
     if interaction.guild_id not in interaction.client.config:
@@ -448,6 +463,42 @@ async def _stats_callback(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=stats_embed, ephemeral=True)
 
+# --- Command Object Creation ---
+# Manually create command objects at the module level to ensure they are fully
+# initialized before the bot class is instantiated. This can prevent
+# synchronization issues.
+admin_perms = discord.Permissions(administrator=True)
+
+setup_cmd = app_commands.Command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.", callback=_setup_callback)
+setup_cmd.default_permissions = admin_perms
+
+addkeys_cmd = app_commands.Command(name="addkeys", description="📚 Add multiple keys to the store.", callback=_addkeys_callback)
+addkeys_cmd.default_permissions = admin_perms
+
+removekeys_cmd = app_commands.Command(name="removekeys", description="🗑️ Remove multiple keys from the store.", callback=_removekeys_callback)
+removekeys_cmd.default_permissions = admin_perms
+
+loadkeys_cmd = app_commands.Command(
+    name="loadkeys", 
+    description="📤 Load keys from a text file.", 
+    callback=_loadkeys_callback
+)
+loadkeys_cmd.default_permissions = admin_perms
+
+customize_cmd = app_commands.Command(name="customize", description="📜 Customize the success messages for role claims.", callback=_customize_callback)
+customize_cmd.default_permissions = admin_perms
+
+clearkeys_cmd = app_commands.Command(name="clearkeys", description="🗑️ Remove all available keys from the store.", callback=_clearkeys_callback)
+clearkeys_cmd.default_permissions = admin_perms
+
+stats_cmd = app_commands.Command(name="stats", description="📊 View statistics for this realm.", callback=_stats_callback)
+stats_cmd.default_permissions = admin_perms
+
+ADMIN_COMMANDS = [
+    setup_cmd, addkeys_cmd, removekeys_cmd, loadkeys_cmd, 
+    customize_cmd, clearkeys_cmd, stats_cmd
+]
+
 print("--- Realm Keeper script starting ---")
 
 class RealmKeeper(commands.Bot):
@@ -459,38 +510,8 @@ class RealmKeeper(commands.Bot):
         self.locks = defaultdict(asyncio.Lock)
         self.registered_commands = set()
         
-        # Manually create command objects
-        admin_perms = discord.Permissions(administrator=True)
-
-        setup_cmd = app_commands.Command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.", callback=_setup_callback)
-        setup_cmd.default_permissions = admin_perms
-
-        addkeys_cmd = app_commands.Command(name="addkeys", description="📚 Add multiple keys to the store.", callback=_addkeys_callback)
-        addkeys_cmd.default_permissions = admin_perms
-
-        removekeys_cmd = app_commands.Command(name="removekeys", description="🗑️ Remove multiple keys from the store.", callback=_removekeys_callback)
-        removekeys_cmd.default_permissions = admin_perms
-        
-        loadkeys_cmd = app_commands.Command(
-            name="loadkeys", 
-            description="📤 Load keys from a text file.", 
-            callback=_loadkeys_callback
-        )
-        loadkeys_cmd.default_permissions = admin_perms
-
-        customize_cmd = app_commands.Command(name="customize", description="📜 Customize the success messages for role claims.", callback=_customize_callback)
-        customize_cmd.default_permissions = admin_perms
-        
-        clearkeys_cmd = app_commands.Command(name="clearkeys", description="🗑️ Remove all available keys from the store.", callback=_clearkeys_callback)
-        clearkeys_cmd.default_permissions = admin_perms
-        
-        stats_cmd = app_commands.Command(name="stats", description="📊 View statistics for this realm.", callback=_stats_callback)
-        stats_cmd.default_permissions = admin_perms
-
-        self.admin_commands = [
-            setup_cmd, addkeys_cmd, removekeys_cmd, loadkeys_cmd, 
-            customize_cmd, clearkeys_cmd, stats_cmd
-        ]
+        # Reference the globally defined command objects.
+        self.admin_commands = ADMIN_COMMANDS
 
     async def setup_hook(self):
         """Initialize bot systems"""
