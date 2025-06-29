@@ -298,37 +298,26 @@ class CustomizeModal(discord.ui.Modal, title="📜 Customize Success Messages"):
 
 # --- Command Functions ---
 # These are defined before the Bot class so they can be referenced during its initialization.
-@app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
-@app_commands.default_permissions(administrator=True)
-async def setup(interaction: discord.Interaction):
+
+async def _setup_callback(interaction: discord.Interaction):
     if not interaction.guild.me.guild_permissions.manage_roles:
         await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
         return
     await interaction.response.send_modal(SetupModal())
 
-@app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
-@app_commands.default_permissions(administrator=True)
-async def addkeys(interaction: discord.Interaction):
+async def _addkeys_callback(interaction: discord.Interaction):
     if interaction.guild_id not in interaction.client.config:
         await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
         return
     await interaction.response.send_modal(BulkKeyModal())
 
-@app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
-@app_commands.default_permissions(administrator=True)
-async def removekeys(interaction: discord.Interaction):
+async def _removekeys_callback(interaction: discord.Interaction):
     if interaction.guild_id not in interaction.client.config:
         await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
         return
     await interaction.response.send_modal(RemoveKeysModal())
 
-@app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(
-    file="The text file containing keys (one per line).",
-    overwrite="Select True to remove all existing keys before adding new ones."
-)
-async def loadkeys(
+async def _loadkeys_callback(
     interaction: discord.Interaction,
     file: discord.Attachment,
     overwrite: bool = False
@@ -382,9 +371,7 @@ async def loadkeys(
         ephemeral=True
     )
 
-@app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
-@app_commands.default_permissions(administrator=True)
-async def customize(interaction: discord.Interaction):
+async def _customize_callback(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     bot = interaction.client
     cfg = bot.config.get(guild_id)
@@ -393,9 +380,7 @@ async def customize(interaction: discord.Interaction):
         return
     await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
 
-@app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
-@app_commands.default_permissions(administrator=True)
-async def clearkeys(interaction: discord.Interaction):
+async def _clearkeys_callback(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     bot = interaction.client
     cfg = bot.config.get(guild_id)
@@ -415,9 +400,7 @@ async def clearkeys(interaction: discord.Interaction):
     
     await interaction.followup.send(f"🗑️ Cleared all {key_count} keys!", ephemeral=True)
 
-@app_commands.command(name="stats", description="📊 View statistics for this realm.")
-@app_commands.default_permissions(administrator=True)
-async def stats(interaction: discord.Interaction):
+async def _stats_callback(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     bot = interaction.client
     cfg = bot.config.get(guild_id)
@@ -472,8 +455,48 @@ class RealmKeeper(commands.Bot):
         self.locks = defaultdict(asyncio.Lock)
         self.registered_commands = set()
         
-        # This list of commands is now defined before the class, so this works.
-        self.admin_commands = [setup, addkeys, removekeys, loadkeys, customize, clearkeys, stats]
+        # Manually create command objects
+        admin_perms = discord.Permissions(administrator=True)
+
+        setup_cmd = app_commands.Command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.", callback=_setup_callback)
+        setup_cmd.default_permissions = admin_perms
+
+        addkeys_cmd = app_commands.Command(name="addkeys", description="📚 Add multiple keys to the store.", callback=_addkeys_callback)
+        addkeys_cmd.default_permissions = admin_perms
+
+        removekeys_cmd = app_commands.Command(name="removekeys", description="🗑️ Remove multiple keys from the store.", callback=_removekeys_callback)
+        removekeys_cmd.default_permissions = admin_perms
+        
+        loadkeys_cmd = app_commands.Command(
+            name="loadkeys", 
+            description="📤 Load keys from a text file.", 
+            callback=_loadkeys_callback
+        )
+        loadkeys_cmd.default_permissions = admin_perms
+        loadkeys_cmd.add_parameter(
+            name="file",
+            description="The text file containing keys (one per line).",
+            required=True
+        )
+        loadkeys_cmd.add_parameter(
+            name="overwrite",
+            description="Select True to remove all existing keys before adding new ones.",
+            required=False
+        )
+
+        customize_cmd = app_commands.Command(name="customize", description="📜 Customize the success messages for role claims.", callback=_customize_callback)
+        customize_cmd.default_permissions = admin_perms
+        
+        clearkeys_cmd = app_commands.Command(name="clearkeys", description="🗑️ Remove all available keys from the store.", callback=_clearkeys_callback)
+        clearkeys_cmd.default_permissions = admin_perms
+        
+        stats_cmd = app_commands.Command(name="stats", description="📊 View statistics for this realm.", callback=_stats_callback)
+        stats_cmd.default_permissions = admin_perms
+
+        self.admin_commands = [
+            setup_cmd, addkeys_cmd, removekeys_cmd, loadkeys_cmd, 
+            customize_cmd, clearkeys_cmd, stats_cmd
+        ]
 
     async def setup_hook(self):
         """Initialize bot systems"""
