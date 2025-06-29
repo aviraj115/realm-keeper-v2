@@ -317,6 +317,10 @@ async def _removekeys_callback(interaction: discord.Interaction):
         return
     await interaction.response.send_modal(RemoveKeysModal())
 
+@app_commands.describe(
+    file="The text file containing keys (one per line).",
+    overwrite="Select True to remove all existing keys before adding new ones."
+)
 async def _loadkeys_callback(
     interaction: discord.Interaction,
     file: discord.Attachment,
@@ -473,16 +477,6 @@ class RealmKeeper(commands.Bot):
             callback=_loadkeys_callback
         )
         loadkeys_cmd.default_permissions = admin_perms
-        loadkeys_cmd.add_parameter(
-            name="file",
-            description="The text file containing keys (one per line).",
-            required=True
-        )
-        loadkeys_cmd.add_parameter(
-            name="overwrite",
-            description="Select True to remove all existing keys before adding new ones.",
-            required=False
-        )
 
         customize_cmd = app_commands.Command(name="customize", description="📜 Customize the success messages for role claims.", callback=_customize_callback)
         customize_cmd.default_permissions = admin_perms
