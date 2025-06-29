@@ -144,12 +144,16 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 return
             
             command_name = self.command_name_input.value.strip().lower()
-            reserved_names = [cmd.name for cmd in bot.tree.get_commands()]
-            if command_name in reserved_names:
-                await interaction.followup.send(f"⚠️ Command name `/{command_name}` is reserved! Choose another.", ephemeral=True)
+            # We check against reserved names + the dynamic one for this guild if it exists
+            # Note: This check isn't perfect in a multi-guild scenario but is good enough.
+            reserved_names = [cmd.name for cmd in bot.tree.get_commands(guild=interaction.guild)]
+            if command_name in reserved_names and command_name != bot.config.get(interaction.guild_id, None):
+                await interaction.followup.send(f"⚠️ Command name `/{command_name}` is already in use on this server! Choose another.", ephemeral=True)
                 return
             
             guild_id = interaction.guild.id
+            is_new_setup = guild_id not in bot.config
+            
             bot.config[guild_id] = GuildConfig(role.id)
             cfg = bot.config[guild_id]
             cfg.command = command_name
@@ -164,10 +168,14 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                     else:
                         invalid += 1
             
-            success = await bot._create_dynamic_command(guild_id, command_name)
-            if not success:
-                await interaction.followup.send("⚠️ Failed to create the slash command. Please check my permissions and try again.", ephemeral=True)
-                if guild_id in bot.config:
+            # Instead of a separate function, we now handle command registration for the guild here
+            try:
+                # This function now handles adding admin + dynamic commands and syncing for a guild
+                await bot.register_guild_commands(interaction.guild, command_name)
+            except Exception as e:
+                logging.error(f"Error registering commands during setup: {e}")
+                await interaction.followup.send("⚠️ Failed to create the slash commands. Please check my permissions and try again.", ephemeral=True)
+                if is_new_setup and guild_id in bot.config:
                     del bot.config[guild_id] # Clean up failed config
                 return
 
@@ -176,7 +184,7 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             response = [
                 f"✨ Realm initialized for {role.mention}!",
                 f"Use `/{command_name}` to claim the role.",
-                "⚠️ It may take a minute for Discord to show the new command."
+                "✅ All commands should now be available on this server."
             ]
             if initial_keys:
                 response.append(f"\n📦 Loaded {added} initial keys ({invalid} were invalid or duplicates).")
@@ -472,18 +480,19 @@ class RealmKeeper(commands.Bot):
         try:
             await self.load_config()
             
-            # Add all commands to the tree
+            # Add all admin commands to the tree instance.
+            # They will be assigned to guilds below.
             for cmd in self.admin_commands:
                 self.tree.add_command(cmd)
             
-            # Sync global commands
-            await self.tree.sync()
-            logging.info("✅ Global commands synced")
-            
-            # Create and sync guild-specific commands for existing configs
+            # Create and sync guild-specific commands for all existing configs
             for guild_id, cfg in self.config.items():
-                if self.get_guild(guild_id):
-                    await self._create_dynamic_command(guild_id, cfg.command)
+                guild = self.get_guild(guild_id)
+                if guild:
+                    # This new method handles registering all commands for a guild and syncing.
+                    await self.register_guild_commands(guild, cfg.command)
+                else:
+                    logging.warning(f"Config found for guild {guild_id}, but the bot is not in that server.")
             
             logging.info("✅ Realm Keeper initialized")
         except Exception as e:
@@ -533,56 +542,36 @@ class RealmKeeper(commands.Bot):
             logging.error("Could not decode realms.json. File might be corrupt.")
             self.config = {}
 
-    async def _create_dynamic_command(self, guild_id: int, command_name: str):
-        """Create dynamic claim command for a guild"""
-        try:
-            guild = self.get_guild(guild_id)
-            if not guild:
-                logging.error(f"Guild {guild_id} not found")
-                return False
-            
-            # Since admin commands are global, we only need to manage the one dynamic command here.
-            # We clear guild commands to ensure no old dynamic commands are left over.
-            self.tree.clear_commands(guild=guild)
-            
-            @app_commands.command(name=command_name, description="✨ Claim your role with a mystical key")
-            @app_commands.guild_only()
-            @app_commands.default_permissions() # This is the key to making it visible to @everyone
-            async def claim_command(interaction: discord.Interaction):
-                """Claim your role with a key"""
-                if interaction.guild_id != guild_id:
-                    return
-                
-                await interaction.response.send_modal(ArcaneGatewayModal())
-            
-            self.tree.add_command(claim_command, guild=guild)
-            await self.tree.sync(guild=guild)
-            
-            self.registered_commands.add((guild_id, command_name))
-            logging.info(f"✅ Created command /{command_name} in guild {guild_id}")
-            
-            return True
-        except Exception as e:
-            logging.error(f"Failed to create command '{command_name}' in guild {guild_id}: {e}")
-            return False
-
-    async def save_config(self):
+    async def register_guild_commands(self, guild: discord.Guild, claim_command_name: str):
         """
-        Saves the current configuration to realms.json.
+        Clears all old commands, then adds the admin commands and the dynamic
+        claim command for a specific guild before syncing.
         """
-        data = {
-            str(gid): {
-                'role_id': cfg.role_id,
-                'command': cfg.command,
-                'keys': list(cfg.key_store),
-                'success_msgs': cfg.success_msgs,
-                'custom_cooldown': cfg.custom_cooldown,
-                'stats': cfg.stats
-            }
-            for gid, cfg in self.config.items()
-        }
-        with open('realms.json', 'w') as f:
-            json.dump(data, f, indent=4)
+        logging.info(f"Registering commands for guild: {guild.name} ({guild.id})")
+        
+        # We clear all commands for this guild first to ensure a clean slate.
+        self.tree.clear_commands(guild=guild)
+        
+        # Add the admin commands for this specific guild.
+        for cmd in self.admin_commands:
+            self.tree.add_command(cmd, guild=guild)
+        
+        # Define the dynamic claim command inside this method
+        @app_commands.command(name=claim_command_name, description="✨ Claim your role with a mystical key")
+        @app_commands.guild_only()
+        @app_commands.default_permissions()
+        async def claim_command(interaction: discord.Interaction):
+            """Claim your role with a key"""
+            # The check for guild_id is good practice but redundant since it's a guild command.
+            if interaction.guild_id != guild.id:
+                return
+            await interaction.response.send_modal(ArcaneGatewayModal())
+            
+        self.tree.add_command(claim_command, guild=guild)
+        
+        # Sync all the newly added commands to the guild.
+        await self.tree.sync(guild=guild)
+        logging.info(f"✅ Synced {len(self.admin_commands) + 1} commands to guild {guild.name}")
 
     async def process_claim(self, interaction: discord.Interaction, key: str):
         """Process a key claim attempt"""
@@ -706,6 +695,24 @@ class RealmKeeper(commands.Bot):
                 )
             except discord.errors.InteractionResponded:
                 pass # Already responded, can't send again
+
+    async def save_config(self):
+        """
+        Saves the current configuration to realms.json.
+        """
+        data = {
+            str(gid): {
+                'role_id': cfg.role_id,
+                'command': cfg.command,
+                'keys': list(cfg.key_store),
+                'success_msgs': cfg.success_msgs,
+                'custom_cooldown': cfg.custom_cooldown,
+                'stats': cfg.stats
+            }
+            for gid, cfg in self.config.items()
+        }
+        with open('realms.json', 'w') as f:
+            json.dump(data, f, indent=4)
 
 bot = RealmKeeper()
 
