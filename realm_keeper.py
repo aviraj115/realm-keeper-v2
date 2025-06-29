@@ -453,6 +453,8 @@ async def stats(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=stats_embed, ephemeral=True)
 
+print("--- Realm Keeper script starting ---")
+
 class RealmKeeper(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -715,4 +717,5 @@ if __name__ == "__main__":
     if not TOKEN:
         raise ValueError("Missing DISCORD_TOKEN in environment")
     
+    print("--- Token loaded, attempting to run bot ---")
     bot.run(TOKEN)
