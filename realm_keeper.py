@@ -480,19 +480,17 @@ class RealmKeeper(commands.Bot):
         try:
             await self.load_config()
             
-            # Add all admin commands to the tree instance.
-            # They will be assigned to guilds below.
-            for cmd in self.admin_commands:
-                self.tree.add_command(cmd)
-            
-            # Create and sync guild-specific commands for all existing configs
-            for guild_id, cfg in self.config.items():
-                guild = self.get_guild(guild_id)
-                if guild:
-                    # This new method handles registering all commands for a guild and syncing.
-                    await self.register_guild_commands(guild, cfg.command)
-                else:
-                    logging.warning(f"Config found for guild {guild_id}, but the bot is not in that server.")
+            # Register commands for every guild the bot is a member of.
+            for guild in self.guilds:
+                cfg = self.config.get(guild.id)
+                claim_command_name = cfg.command if cfg else None
+                await self.register_guild_commands(guild, claim_command_name)
+
+            # Log guilds from config that the bot isn't in.
+            configured_guild_ids = set(self.config.keys())
+            current_guild_ids = {g.id for g in self.guilds}
+            for guild_id in configured_guild_ids - current_guild_ids:
+                logging.warning(f"Config found for guild {guild_id}, but the bot is not in that server.")
             
             logging.info("✅ Realm Keeper initialized")
         except Exception as e:
@@ -542,9 +540,9 @@ class RealmKeeper(commands.Bot):
             logging.error("Could not decode realms.json. File might be corrupt.")
             self.config = {}
 
-    async def register_guild_commands(self, guild: discord.Guild, claim_command_name: str):
+    async def register_guild_commands(self, guild: discord.Guild, claim_command_name: str | None):
         """
-        Clears all old commands, then adds the admin commands and the dynamic
+        Clears all old commands, then adds the admin commands and optionally the dynamic
         claim command for a specific guild before syncing.
         """
         logging.info(f"Registering commands for guild: {guild.name} ({guild.id})")
@@ -556,22 +554,26 @@ class RealmKeeper(commands.Bot):
         for cmd in self.admin_commands:
             self.tree.add_command(cmd, guild=guild)
         
-        # Define the dynamic claim command inside this method
-        @app_commands.command(name=claim_command_name, description="✨ Claim your role with a mystical key")
-        @app_commands.guild_only()
-        @app_commands.default_permissions()
-        async def claim_command(interaction: discord.Interaction):
-            """Claim your role with a key"""
-            # The check for guild_id is good practice but redundant since it's a guild command.
-            if interaction.guild_id != guild.id:
-                return
-            await interaction.response.send_modal(ArcaneGatewayModal())
+        command_count = len(self.admin_commands)
+
+        # If a claim command name is provided, define and add it.
+        if claim_command_name:
+            @app_commands.command(name=claim_command_name, description="✨ Claim your role with a mystical key")
+            @app_commands.guild_only()
+            @app_commands.default_permissions()
+            async def claim_command(interaction: discord.Interaction):
+                """Claim your role with a key"""
+                # The check for guild_id is good practice but redundant since it's a guild command.
+                if interaction.guild_id != guild.id:
+                    return
+                await interaction.response.send_modal(ArcaneGatewayModal())
             
-        self.tree.add_command(claim_command, guild=guild)
+            self.tree.add_command(claim_command, guild=guild)
+            command_count += 1
         
         # Sync all the newly added commands to the guild.
         await self.tree.sync(guild=guild)
-        logging.info(f"✅ Synced {len(self.admin_commands) + 1} commands to guild {guild.name}")
+        logging.info(f"✅ Synced {command_count} commands to guild {guild.name}")
 
     async def process_claim(self, interaction: discord.Interaction, key: str):
         """Process a key claim attempt"""
