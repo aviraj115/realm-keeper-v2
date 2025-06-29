@@ -585,9 +585,6 @@ class RealmKeeper(commands.Bot):
         """
         logging.info(f"Registering commands for guild: {guild.name} ({guild.id})")
         
-        # We clear all commands for this guild first to ensure a clean slate.
-        self.tree.clear_commands(guild=guild)
-        
         # Add the admin commands for this specific guild.
         for cmd in self.admin_commands:
             self.tree.add_command(cmd, guild=guild)
