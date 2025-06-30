@@ -568,7 +568,10 @@ class RealmKeeper(commands.Bot):
                     if cfg.command:
                         cog_name = f"ClaimCog_{guild.id}"
                         if not self.get_cog(cog_name):
-                            await self.add_cog(ClaimCog(self, cfg.command), guilds=[guild])
+                            claim_cog = ClaimCog(self, cfg.command)
+                            # Manually set the cog's name to be unique for each guild
+                            claim_cog.__cog_name__ = cog_name
+                            await self.add_cog(claim_cog, guilds=[guild])
                             logging.info(f"✅ Created command /{cfg.command} in guild {guild.name}")
                 
                 # Sync commands for the guild
@@ -637,8 +640,9 @@ class RealmKeeper(commands.Bot):
             await self.remove_cog(cog_name)
             logging.info(f"Removed old claim cog for guild {guild.id}")
 
-        # Add the new cog
+        # Add the new cog with a unique name
         claim_cog = ClaimCog(self, command_name)
+        claim_cog.__cog_name__ = cog_name
         await self.add_cog(claim_cog, guilds=[guild])
         logging.info(f"Added new claim cog for guild {guild.id} with command /{command_name}")
         
