@@ -482,18 +482,22 @@ class AdminCog(commands.Cog):
         return True
 
     @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
+    @app_commands.default_permissions(administrator=True)
     async def setup(self, interaction: discord.Interaction):
         await _setup_callback(interaction)
 
     @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
+    @app_commands.default_permissions(administrator=True)
     async def addkeys(self, interaction: discord.Interaction):
         await _addkeys_callback(interaction)
 
     @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
+    @app_commands.default_permissions(administrator=True)
     async def removekeys(self, interaction: discord.Interaction):
         await _removekeys_callback(interaction)
 
     @app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         file="The text file containing keys (one per line).",
         overwrite="Select True to remove all existing keys before adding new ones."
@@ -502,14 +506,17 @@ class AdminCog(commands.Cog):
         await _loadkeys_callback(interaction, file, overwrite)
 
     @app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
+    @app_commands.default_permissions(administrator=True)
     async def customize(self, interaction: discord.Interaction):
         await _customize_callback(interaction)
 
     @app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
+    @app_commands.default_permissions(administrator=True)
     async def clearkeys(self, interaction: discord.Interaction):
         await _clearkeys_callback(interaction)
 
     @app_commands.command(name="stats", description="📊 View statistics for this realm.")
+    @app_commands.default_permissions(administrator=True)
     async def stats(self, interaction: discord.Interaction):
         await _stats_callback(interaction)
 
