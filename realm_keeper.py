@@ -476,21 +476,25 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
     async def setup(self, interaction: discord.Interaction):
         await _setup_callback(interaction)
 
     @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
     async def addkeys(self, interaction: discord.Interaction):
         await _addkeys_callback(interaction)
 
     @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
     async def removekeys(self, interaction: discord.Interaction):
         await _removekeys_callback(interaction)
 
     @app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
     @app_commands.describe(
         file="The text file containing keys (one per line).",
         overwrite="Select True to remove all existing keys before adding new ones."
@@ -500,16 +504,19 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
     async def customize(self, interaction: discord.Interaction):
         await _customize_callback(interaction)
 
     @app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
     async def clearkeys(self, interaction: discord.Interaction):
         await _clearkeys_callback(interaction)
 
     @app_commands.command(name="stats", description="📊 View statistics for this realm.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
     async def stats(self, interaction: discord.Interaction):
         await _stats_callback(interaction)
 
@@ -555,18 +562,20 @@ class RealmKeeper(commands.Bot):
         try:
             await self.load_config()
             
-            # Add the static admin cog globally
-            await self.add_cog(AdminCog(self))
+            # Add AdminCog to all guilds the bot is in.
+            # The commands in AdminCog are guild-only.
+            await self.add_cog(AdminCog(self), guilds=self.guilds)
 
-            # For each guild, add claim cog and sync all commands
+            # For each guild, add the dynamic claim cog if it's configured.
             for guild in self.guilds:
                 cfg = self.config.get(guild.id)
                 if cfg and cfg.command:
                     cog_name = f"ClaimCog_{guild.id}"
-                    if not self.get_cog(cog_name): # Avoid re-adding on reconnect
+                    if not self.get_cog(cog_name):
                         claim_cog = ClaimCog(self, cfg.command)
                         await self.add_cog(claim_cog, guilds=[guild])
 
+                # Sync all commands for the guild.
                 await self.tree.sync(guild=guild)
                 logging.info(f"Synced commands for guild: {guild.name} ({guild.id})")
 
