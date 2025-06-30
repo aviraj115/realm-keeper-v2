@@ -482,22 +482,18 @@ class AdminCog(commands.Cog):
         return True
 
     @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
-    @app_commands.guild_only()
     async def setup(self, interaction: discord.Interaction):
         await _setup_callback(interaction)
 
     @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
-    @app_commands.guild_only()
     async def addkeys(self, interaction: discord.Interaction):
         await _addkeys_callback(interaction)
 
     @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
-    @app_commands.guild_only()
     async def removekeys(self, interaction: discord.Interaction):
         await _removekeys_callback(interaction)
 
     @app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
-    @app_commands.guild_only()
     @app_commands.describe(
         file="The text file containing keys (one per line).",
         overwrite="Select True to remove all existing keys before adding new ones."
@@ -506,17 +502,14 @@ class AdminCog(commands.Cog):
         await _loadkeys_callback(interaction, file, overwrite)
 
     @app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
-    @app_commands.guild_only()
     async def customize(self, interaction: discord.Interaction):
         await _customize_callback(interaction)
 
     @app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
-    @app_commands.guild_only()
     async def clearkeys(self, interaction: discord.Interaction):
         await _clearkeys_callback(interaction)
 
     @app_commands.command(name="stats", description="📊 View statistics for this realm.")
-    @app_commands.guild_only()
     async def stats(self, interaction: discord.Interaction):
         await _stats_callback(interaction)
 
@@ -530,8 +523,7 @@ class ClaimCog(commands.Cog):
             description="✨ Claim your role with a mystical key",
             callback=self.claim_callback
         )
-        # Manually set guild_only and default_permissions
-        self._claim_command.guild_only = True
+        # The command is implicitly guild-specific because the cog is loaded for a specific guild.
 
     async def claim_callback(self, interaction: discord.Interaction):
         """The callback for the dynamic claim command."""
@@ -560,41 +552,33 @@ class RealmKeeper(commands.Bot):
         """Initialize bot systems"""
         try:
             await self.load_config()
-            
-            # Add AdminCog to all guilds the bot is in.
-            # The commands in AdminCog are guild-only.
-            await self.add_cog(AdminCog(self), guilds=self.guilds)
-
-            # For each guild, add the dynamic claim cog if it's configured.
-            for guild in self.guilds:
-                cfg = self.config.get(guild.id)
-                if cfg and cfg.command:
-                    cog_name = f"ClaimCog_{guild.id}"
-                    if not self.get_cog(cog_name):
-                        claim_cog = ClaimCog(self, cfg.command)
-                        await self.add_cog(claim_cog, guilds=[guild])
-
-                # Sync all commands for the guild.
-                await self.tree.sync(guild=guild)
-                logging.info(f"Synced commands for guild: {guild.name} ({guild.id})")
-
-            # Log guilds from config that the bot isn't in.
-            configured_guild_ids = set(self.config.keys())
-            current_guild_ids = {g.id for g in self.guilds}
-            for guild_id in configured_guild_ids - current_guild_ids:
-                logging.warning(f"Config found for guild {guild_id}, but the bot is not in that server.")
-            
-            logging.info("✅ Realm Keeper initialized")
+            # Add admin commands globally. They have a cog_check for permissions.
+            await self.add_cog(AdminCog(self))
         except Exception as e:
             logging.error(f"Setup error: {e}", exc_info=True)
             raise
-        except json.JSONDecodeError:
-            logging.error("Could not decode realms.json. File might be corrupt.")
-            self.config = {}
 
     async def on_ready(self):
-        """Called when bot is ready"""
+        """Called when bot is ready and guild data is available."""
         try:
+            # Create guild-specific commands for each configured guild.
+            for guild in self.guilds:
+                if guild.id in self.config:
+                    cfg = self.config[guild.id]
+                    if cfg.command:
+                        cog_name = f"ClaimCog_{guild.id}"
+                        if not self.get_cog(cog_name):
+                            await self.add_cog(ClaimCog(self, cfg.command), guilds=[guild])
+                            logging.info(f"✅ Created command /{cfg.command} in guild {guild.name}")
+                
+                # Sync commands for the guild
+                await self.tree.sync(guild=guild)
+
+            # Sync global commands
+            await self.tree.sync(guild=None)
+            logging.info("✅ Global commands synced.")
+
+            # Set custom activity
             activity = discord.Activity(
                 type=discord.ActivityType.watching,
                 name="for ✨ mystical keys"
@@ -602,8 +586,15 @@ class RealmKeeper(commands.Bot):
             await self.change_presence(activity=activity)
             logging.info(f"✅ Bot ready as {self.user}")
         except Exception as e:
-            logging.error(f"Ready event error: {e}")
+            logging.error(f"Ready event error: {e}", exc_info=True)
             raise
+
+    async def on_guild_remove(self, guild: discord.Guild):
+        """Clean up config when bot leaves a guild."""
+        if guild.id in self.config:
+            del self.config[guild.id]
+            await self.save_config()
+            logging.info(f"Removed configuration for guild {guild.id} as I was removed.")
 
     async def load_config(self):
         """
