@@ -532,7 +532,7 @@ class ClaimCog(commands.Cog):
         )
         # Manually set guild_only and default_permissions
         self._claim_command.guild_only = True
-        self._claim_command.default_permissions = discord.Permissions() # Available to @everyone
+        self._claim_command.default_permissions = discord.Permissions(view_channel=True) # Available to @everyone
 
     async def claim_callback(self, interaction: discord.Interaction):
         """The callback for the dynamic claim command."""
