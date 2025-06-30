@@ -147,7 +147,11 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             # We check against reserved names + the dynamic one for this guild if it exists
             # Note: This check isn't perfect in a multi-guild scenario but is good enough.
             reserved_names = [cmd.name for cmd in bot.tree.get_commands(guild=interaction.guild)]
-            if command_name in reserved_names and command_name != bot.config.get(interaction.guild_id, None):
+            current_claim_command = bot.config.get(interaction.guild_id, None)
+            if current_claim_command:
+                 current_claim_command = current_claim_command.command
+
+            if command_name in reserved_names and command_name != current_claim_command:
                 await interaction.followup.send(f"⚠️ Command name `/{command_name}` is already in use on this server! Choose another.", ephemeral=True)
                 return
             
@@ -173,7 +177,7 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 # This function now handles adding admin + dynamic commands and syncing for a guild
                 await bot.register_guild_commands(interaction.guild, command_name)
             except Exception as e:
-                logging.error(f"Error registering commands during setup: {e}")
+                logging.error(f"Error registering commands during setup: {e}", exc_info=True)
                 await interaction.followup.send("⚠️ Failed to create the slash commands. Please check my permissions and try again.", ephemeral=True)
                 if is_new_setup and guild_id in bot.config:
                     del bot.config[guild_id] # Clean up failed config
@@ -463,41 +467,77 @@ async def _stats_callback(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=stats_embed, ephemeral=True)
 
-# --- Command Object Creation ---
-# Manually create command objects at the module level to ensure they are fully
-# initialized before the bot class is instantiated. This can prevent
-# synchronization issues.
-admin_perms = discord.Permissions(administrator=True)
+# --- Cogs for Commands ---
 
-setup_cmd = app_commands.Command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.", callback=_setup_callback)
-setup_cmd.default_permissions = admin_perms
+class AdminCog(commands.Cog):
+    """Cog for all admin-level commands."""
+    def __init__(self, bot: "RealmKeeper"):
+        self.bot = bot
 
-addkeys_cmd = app_commands.Command(name="addkeys", description="📚 Add multiple keys to the store.", callback=_addkeys_callback)
-addkeys_cmd.default_permissions = admin_perms
+    @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
+    @app_commands.default_permissions(administrator=True)
+    async def setup(self, interaction: discord.Interaction):
+        await _setup_callback(interaction)
 
-removekeys_cmd = app_commands.Command(name="removekeys", description="🗑️ Remove multiple keys from the store.", callback=_removekeys_callback)
-removekeys_cmd.default_permissions = admin_perms
+    @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
+    @app_commands.default_permissions(administrator=True)
+    async def addkeys(self, interaction: discord.Interaction):
+        await _addkeys_callback(interaction)
 
-loadkeys_cmd = app_commands.Command(
-    name="loadkeys", 
-    description="📤 Load keys from a text file.", 
-    callback=_loadkeys_callback
-)
-loadkeys_cmd.default_permissions = admin_perms
+    @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
+    @app_commands.default_permissions(administrator=True)
+    async def removekeys(self, interaction: discord.Interaction):
+        await _removekeys_callback(interaction)
 
-customize_cmd = app_commands.Command(name="customize", description="📜 Customize the success messages for role claims.", callback=_customize_callback)
-customize_cmd.default_permissions = admin_perms
+    @app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(
+        file="The text file containing keys (one per line).",
+        overwrite="Select True to remove all existing keys before adding new ones."
+    )
+    async def loadkeys(self, interaction: discord.Interaction, file: discord.Attachment, overwrite: bool = False):
+        await _loadkeys_callback(interaction, file, overwrite)
 
-clearkeys_cmd = app_commands.Command(name="clearkeys", description="🗑️ Remove all available keys from the store.", callback=_clearkeys_callback)
-clearkeys_cmd.default_permissions = admin_perms
+    @app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
+    @app_commands.default_permissions(administrator=True)
+    async def customize(self, interaction: discord.Interaction):
+        await _customize_callback(interaction)
 
-stats_cmd = app_commands.Command(name="stats", description="📊 View statistics for this realm.", callback=_stats_callback)
-stats_cmd.default_permissions = admin_perms
+    @app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
+    @app_commands.default_permissions(administrator=True)
+    async def clearkeys(self, interaction: discord.Interaction):
+        await _clearkeys_callback(interaction)
 
-ADMIN_COMMANDS = [
-    setup_cmd, addkeys_cmd, removekeys_cmd, loadkeys_cmd, 
-    customize_cmd, clearkeys_cmd, stats_cmd
-]
+    @app_commands.command(name="stats", description="📊 View statistics for this realm.")
+    @app_commands.default_permissions(administrator=True)
+    async def stats(self, interaction: discord.Interaction):
+        await _stats_callback(interaction)
+
+class ClaimCog(commands.Cog):
+    """A cog created dynamically for each guild's claim command."""
+    def __init__(self, bot: "RealmKeeper", command_name: str):
+        self.bot = bot
+        # Create the command dynamically
+        self._claim_command = app_commands.Command(
+            name=command_name,
+            description="✨ Claim your role with a mystical key",
+            callback=self.claim_callback
+        )
+        # Manually set guild_only and default_permissions
+        self._claim_command.guild_only = True
+        self._claim_command.default_permissions = discord.Permissions() # Available to @everyone
+
+    async def claim_callback(self, interaction: discord.Interaction):
+        """The callback for the dynamic claim command."""
+        await interaction.response.send_modal(ArcaneGatewayModal())
+    
+    # This is how the command gets registered to the tree
+    def cog_load(self):
+        self.bot.tree.add_command(self._claim_command)
+
+    # This is how the command gets unregistered
+    def cog_unload(self):
+        self.bot.tree.remove_command(self._claim_command.name)
 
 print("--- Realm Keeper script starting ---")
 
@@ -510,19 +550,25 @@ class RealmKeeper(commands.Bot):
         self.locks = defaultdict(asyncio.Lock)
         self.registered_commands = set()
         
-        # Reference the globally defined command objects.
-        self.admin_commands = ADMIN_COMMANDS
-
     async def setup_hook(self):
         """Initialize bot systems"""
         try:
             await self.load_config()
             
-            # Register commands for every guild the bot is a member of.
+            # Add the static admin cog globally
+            await self.add_cog(AdminCog(self))
+
+            # For each guild, add claim cog and sync all commands
             for guild in self.guilds:
                 cfg = self.config.get(guild.id)
-                claim_command_name = cfg.command if cfg else None
-                await self.register_guild_commands(guild, claim_command_name)
+                if cfg and cfg.command:
+                    cog_name = f"ClaimCog_{guild.id}"
+                    if not self.get_cog(cog_name): # Avoid re-adding on reconnect
+                        claim_cog = ClaimCog(self, cfg.command)
+                        await self.add_cog(claim_cog, guilds=[guild])
+
+                await self.tree.sync(guild=guild)
+                logging.info(f"Synced commands for guild: {guild.name} ({guild.id})")
 
             # Log guilds from config that the bot isn't in.
             configured_guild_ids = set(self.config.keys())
@@ -532,8 +578,11 @@ class RealmKeeper(commands.Bot):
             
             logging.info("✅ Realm Keeper initialized")
         except Exception as e:
-            logging.error(f"Setup error: {e}")
+            logging.error(f"Setup error: {e}", exc_info=True)
             raise
+        except json.JSONDecodeError:
+            logging.error("Could not decode realms.json. File might be corrupt.")
+            self.config = {}
 
     async def on_ready(self):
         """Called when bot is ready"""
@@ -578,37 +627,25 @@ class RealmKeeper(commands.Bot):
             logging.error("Could not decode realms.json. File might be corrupt.")
             self.config = {}
 
-    async def register_guild_commands(self, guild: discord.Guild, claim_command_name: str | None):
+    async def register_guild_commands(self, guild: discord.Guild, command_name: str):
         """
-        Clears all old commands, then adds the admin commands and optionally the dynamic
-        claim command for a specific guild before syncing.
+        Dynamically registers or updates the claim command for a guild.
+        This is now called from the setup modal.
         """
-        logging.info(f"Registering commands for guild: {guild.name} ({guild.id})")
-        
-        # Add the admin commands for this specific guild.
-        for cmd in self.admin_commands:
-            self.tree.add_command(cmd, guild=guild)
-        
-        command_count = len(self.admin_commands)
+        # Remove the old cog if it exists
+        cog_name = f"ClaimCog_{guild.id}"
+        if self.get_cog(cog_name):
+            await self.remove_cog(cog_name)
+            logging.info(f"Removed old claim cog for guild {guild.id}")
 
-        # If a claim command name is provided, define and add it.
-        if claim_command_name:
-            @app_commands.command(name=claim_command_name, description="✨ Claim your role with a mystical key")
-            @app_commands.guild_only()
-            @app_commands.default_permissions()
-            async def claim_command(interaction: discord.Interaction):
-                """Claim your role with a key"""
-                # The check for guild_id is good practice but redundant since it's a guild command.
-                if interaction.guild_id != guild.id:
-                    return
-                await interaction.response.send_modal(ArcaneGatewayModal())
-            
-            self.tree.add_command(claim_command, guild=guild)
-            command_count += 1
+        # Add the new cog
+        claim_cog = ClaimCog(self, command_name)
+        await self.add_cog(claim_cog, guilds=[guild])
+        logging.info(f"Added new claim cog for guild {guild.id} with command /{command_name}")
         
-        # Sync all the newly added commands to the guild.
+        # We need to sync the tree for this guild to make the new command appear
         await self.tree.sync(guild=guild)
-        logging.info(f"✅ Synced {command_count} commands to guild {guild.name}")
+        logging.info(f"Synced commands for guild {guild.id} after command update.")
 
     async def process_claim(self, interaction: discord.Interaction, key: str):
         """Process a key claim attempt"""
