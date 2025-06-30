@@ -474,26 +474,29 @@ class AdminCog(commands.Cog):
     def __init__(self, bot: "RealmKeeper"):
         self.bot = bot
 
+    async def cog_check(self, interaction: discord.Interaction) -> bool:
+        """Check if the user has administrator permissions before any command in this cog is run."""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("🛡️ You must be a server administrator to use this command.", ephemeral=True)
+            return False
+        return True
+
     @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def setup(self, interaction: discord.Interaction):
         await _setup_callback(interaction)
 
     @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def addkeys(self, interaction: discord.Interaction):
         await _addkeys_callback(interaction)
 
     @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def removekeys(self, interaction: discord.Interaction):
         await _removekeys_callback(interaction)
 
     @app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     @app_commands.describe(
         file="The text file containing keys (one per line).",
@@ -503,19 +506,16 @@ class AdminCog(commands.Cog):
         await _loadkeys_callback(interaction, file, overwrite)
 
     @app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def customize(self, interaction: discord.Interaction):
         await _customize_callback(interaction)
 
     @app_commands.command(name="clearkeys", description="🗑️ Remove all available keys from the store.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def clearkeys(self, interaction: discord.Interaction):
         await _clearkeys_callback(interaction)
 
     @app_commands.command(name="stats", description="📊 View statistics for this realm.")
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def stats(self, interaction: discord.Interaction):
         await _stats_callback(interaction)
@@ -532,7 +532,6 @@ class ClaimCog(commands.Cog):
         )
         # Manually set guild_only and default_permissions
         self._claim_command.guild_only = True
-        self._claim_command.default_permissions = discord.Permissions(view_channel=True) # Available to @everyone
 
     async def claim_callback(self, interaction: discord.Interaction):
         """The callback for the dynamic claim command."""
