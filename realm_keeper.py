@@ -326,12 +326,15 @@ class AdminCog(commands.Cog):
         self.bot = bot
 
     async def cog_check(self, interaction: discord.Interaction) -> bool:
+        # This check is a good fallback, but the primary visibility control
+        # is the default_permissions decorator on each command.
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("🛡️ You must be a server administrator to use this command.", ephemeral=True)
             return False
         return True
 
     @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
+    @app_commands.default_permissions(administrator=True)
     async def setup(self, interaction: discord.Interaction):
         if not interaction.guild.me.guild_permissions.manage_roles:
             await interaction.response.send_message("🔒 I need the 'Manage Roles' permission to function!", ephemeral=True)
@@ -339,6 +342,7 @@ class AdminCog(commands.Cog):
         await interaction.response.send_modal(SetupModal())
 
     @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store via a modal.")
+    @app_commands.default_permissions(administrator=True)
     async def addkeys(self, interaction: discord.Interaction):
         if interaction.guild_id not in interaction.client.config:
             await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
@@ -346,6 +350,7 @@ class AdminCog(commands.Cog):
         await interaction.response.send_modal(BulkKeyModal())
 
     @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store via a modal.")
+    @app_commands.default_permissions(administrator=True)
     async def removekeys(self, interaction: discord.Interaction):
         if interaction.guild_id not in interaction.client.config:
             await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
@@ -353,6 +358,7 @@ class AdminCog(commands.Cog):
         await interaction.response.send_modal(RemoveKeysModal())
 
     @app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
+    @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         file="The text file containing keys (one per line).",
         overwrite="Select True to remove all existing keys before adding new ones."
@@ -408,6 +414,7 @@ class AdminCog(commands.Cog):
         )
 
     @app_commands.command(name="customize", description="📜 Customize the success messages for role claims.")
+    @app_commands.default_permissions(administrator=True)
     async def customize(self, interaction: discord.Interaction):
         cfg = interaction.client.config.get(interaction.guild_id)
         if not cfg:
@@ -416,6 +423,7 @@ class AdminCog(commands.Cog):
         await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
 
     @app_commands.command(name="clearkeys", description="🗑️ Remove ALL available keys from the store.")
+    @app_commands.default_permissions(administrator=True)
     async def clearkeys(self, interaction: discord.Interaction):
         cfg = interaction.client.config.get(interaction.guild_id)
         if not cfg:
@@ -435,6 +443,7 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(f"🗑️ Cleared all {key_count} keys!", ephemeral=True)
 
     @app_commands.command(name="stats", description="📊 View statistics for this realm.")
+    @app_commands.default_permissions(administrator=True)
     async def stats(self, interaction: discord.Interaction):
         cfg = interaction.client.config.get(interaction.guild_id)
         if not cfg:
