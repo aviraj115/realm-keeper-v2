@@ -149,7 +149,6 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 return
             
             command_name = self.command_name_input.value.strip().lower()
-            # Command name validation...
             
             # Channel Processing
             channel_name = self.announcement_channel_input.value.strip()
@@ -161,13 +160,32 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                     return
 
             guild_id = interaction.guild.id
+            
+            # If re-configuring, get old command name to check for conflicts
+            old_command_name = None
+            if guild_id in bot.config:
+                old_command_name = bot.config[guild_id].command
+
+            # Prevent setting a command name that's already a global/admin command
+            # unless it's the command we're trying to rename
+            reserved_names = [cmd.name for cmd in bot.tree.get_commands()]
+            if command_name in reserved_names and command_name != old_command_name:
+                 await interaction.followup.send(f"⚠️ Command name `/{command_name}` is already in use by the bot's admin commands! Choose another.", ephemeral=True)
+                 return
+
             is_new_setup = guild_id not in bot.config
             
-            bot.config[guild_id] = GuildConfig(role.id, guild_id)
+            if is_new_setup:
+                bot.config[guild_id] = GuildConfig(role.id, guild_id)
+            
             cfg = bot.config[guild_id]
             cfg.command = command_name
+            cfg.role_id = role.id # Update role ID in case it changed
             if announcement_channel:
                 cfg.announcement_channel_id = announcement_channel.id
+            else:
+                cfg.announcement_channel_id = None
+
             
             added, invalid = 0, 0
             initial_keys = self.initial_keys_input.value.strip()
@@ -183,20 +201,18 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 await bot.register_guild_commands(interaction.guild, command_name)
             except Exception as e:
                 logging.error(f"Error registering commands during setup: {e}", exc_info=True)
-                await interaction.followup.send("⚠️ Failed to create the slash commands.", ephemeral=True)
-                if is_new_setup and guild_id in bot.config:
-                    del bot.config[guild_id]
+                await interaction.followup.send("⚠️ Failed to create or update the slash command.", ephemeral=True)
+                # Don't delete config on failure, just log the error
                 return
 
             await bot.save_config()
 
             response = [
-                f"✨ Realm initialized for {role.mention}!",
+                f"✨ Realm configuration updated for {role.mention}!",
                 f"Use `/{command_name}` to claim the role."
             ]
             if announcement_channel:
                 response.append(f"📢 Success messages will be posted in {announcement_channel.mention}.")
-            response.append("✅ All commands should now be available on this server.")
             if initial_keys:
                 response.append(f"\n📦 Loaded {added} initial keys ({invalid} were invalid or duplicates).")
             
@@ -480,17 +496,16 @@ class ClaimCog(commands.Cog):
         await interaction.response.send_modal(ArcaneGatewayModal())
     
     def cog_load(self):
-        self.bot.tree.add_command(self._claim_command)
+        self.bot.tree.add_command(self._claim_command, guild=self.guild)
 
     def cog_unload(self):
-        self.bot.tree.remove_command(self._claim_command.name)
+        self.bot.tree.remove_command(self._claim_command.name, guild=self.guild)
 
 # --- Main Bot Class ---
 class RealmKeeper(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
-        # Message content intent is not needed for slash commands
         super().__init__(command_prefix='!', intents=intents)
         self.config = dict()
         self.locks = defaultdict(asyncio.Lock)
@@ -499,6 +514,7 @@ class RealmKeeper(commands.Bot):
     async def setup_hook(self):
         try:
             await self.load_config()
+            # AdminCog contains global commands, so it's added without a guild list.
             await self.add_cog(AdminCog(self))
             self.save_task = asyncio.create_task(self.periodic_save())
         except Exception as e:
@@ -507,29 +523,15 @@ class RealmKeeper(commands.Bot):
 
     async def on_ready(self):
         try:
-            # Group guilds by their configured command name
-            commands_to_register = defaultdict(list)
+            # Register one cog per configured guild to handle its dynamic command
             for guild in self.guilds:
                 if guild.id in self.config:
                     cfg = self.config[guild.id]
                     if cfg.command:
-                        commands_to_register[cfg.command].append(guild)
+                        await self.register_guild_commands(guild, cfg.command)
 
-            # Register one cog per unique command name for its group of guilds
-            for command_name, guild_list in commands_to_register.items():
-                cog_name = f"ClaimCog_{command_name.replace('-', '_')}"
-                if not self.get_cog(cog_name):
-                    claim_cog = ClaimCog(self, command_name)
-                    claim_cog.__cog_name__ = cog_name
-                    await self.add_cog(claim_cog, guilds=guild_list)
-                    logging.info(f"✅ Registered command /{command_name} for {len(guild_list)} guild(s).")
-            
-            # Sync all guild-specific commands
-            for guild in self.guilds:
-                await self.tree.sync(guild=guild)
-
-            # Sync global commands
-            await self.tree.sync(guild=None)
+            # Sync global commands once.
+            await self.tree.sync()
             logging.info("✅ Global and guild commands synced.")
 
             activity = discord.Activity(type=discord.ActivityType.watching, name="for ✨ mystical keys")
@@ -538,7 +540,6 @@ class RealmKeeper(commands.Bot):
         except Exception as e:
             logging.error(f"Ready event error: {e}", exc_info=True)
             # Avoid raising the exception here to prevent the bot from crashing on startup
-            # The error is logged, which is sufficient for debugging.
 
     async def on_guild_remove(self, guild: discord.Guild):
         if guild.id in self.config:
@@ -618,18 +619,30 @@ class RealmKeeper(commands.Bot):
                 logging.error(f"Could not save bloom filter for guild {gid}: {e}")
 
     async def register_guild_commands(self, guild: discord.Guild, command_name: str):
+        """
+        Registers or updates the dynamic claim command for a single guild.
+        This function ensures one cog per guild for its dynamic command.
+        """
         cog_name = f"ClaimCog_{guild.id}"
-        if self.get_cog(cog_name):
-            await self.remove_cog(cog_name)
-            logging.info(f"Removed old claim cog for guild {guild.id}")
+        existing_cog = self.get_cog(cog_name)
 
+        if existing_cog:
+            # If the cog exists, we might be renaming the command.
+            # We need to remove the old command before adding the new one.
+            await self.remove_cog(cog_name)
+            logging.info(f"Removed old claim cog for guild {guild.id} to prepare for update.")
+
+        # Create and add the new cog with the potentially new command name.
         claim_cog = ClaimCog(self, command_name)
-        claim_cog.__cog_name__ = cog_name
+        # Manually set the guild attribute so the cog knows where it belongs
+        claim_cog.guild = guild
         await self.add_cog(claim_cog, guilds=[guild])
-        logging.info(f"Added new claim cog for guild {guild.id} with command /{command_name}")
+        logging.info(f"Registered command `/{command_name}` for guild {guild.name} ({guild.id})")
         
+        # Sync the commands for this specific guild to make the change live.
         await self.tree.sync(guild=guild)
         logging.info(f"Synced commands for guild {guild.id} after command update.")
+
 
     async def process_claim(self, interaction: discord.Interaction, key: str):
         await interaction.response.defer(ephemeral=True)
