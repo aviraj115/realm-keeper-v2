@@ -490,6 +490,7 @@ class RealmKeeper(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
+        # Message content intent is not needed for slash commands
         super().__init__(command_prefix='!', intents=intents)
         self.config = dict()
         self.locks = defaultdict(asyncio.Lock)
@@ -506,18 +507,28 @@ class RealmKeeper(commands.Bot):
 
     async def on_ready(self):
         try:
+            # Group guilds by their configured command name
+            commands_to_register = defaultdict(list)
             for guild in self.guilds:
                 if guild.id in self.config:
                     cfg = self.config[guild.id]
                     if cfg.command:
-                        cog_name = f"ClaimCog_{guild.id}"
-                        if not self.get_cog(cog_name):
-                            claim_cog = ClaimCog(self, cfg.command)
-                            claim_cog.__cog_name__ = cog_name
-                            await self.add_cog(claim_cog, guilds=[guild])
-                            logging.info(f"✅ Created command /{cfg.command} in guild {guild.name}")
+                        commands_to_register[cfg.command].append(guild)
+
+            # Register one cog per unique command name for its group of guilds
+            for command_name, guild_list in commands_to_register.items():
+                cog_name = f"ClaimCog_{command_name.replace('-', '_')}"
+                if not self.get_cog(cog_name):
+                    claim_cog = ClaimCog(self, command_name)
+                    claim_cog.__cog_name__ = cog_name
+                    await self.add_cog(claim_cog, guilds=guild_list)
+                    logging.info(f"✅ Registered command /{command_name} for {len(guild_list)} guild(s).")
+            
+            # Sync all guild-specific commands
+            for guild in self.guilds:
                 await self.tree.sync(guild=guild)
 
+            # Sync global commands
             await self.tree.sync(guild=None)
             logging.info("✅ Global and guild commands synced.")
 
@@ -526,7 +537,8 @@ class RealmKeeper(commands.Bot):
             logging.info(f"✅ Bot ready as {self.user}")
         except Exception as e:
             logging.error(f"Ready event error: {e}", exc_info=True)
-            raise
+            # Avoid raising the exception here to prevent the bot from crashing on startup
+            # The error is logged, which is sufficient for debugging.
 
     async def on_guild_remove(self, guild: discord.Guild):
         if guild.id in self.config:
