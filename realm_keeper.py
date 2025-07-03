@@ -1,7 +1,7 @@
 import os
 import uuid
 import json
-import hashlib
+import re
 import logging
 import asyncio
 import discord
@@ -39,17 +39,16 @@ DRAMATIC_MESSAGES = [
 class GuildConfig:
     """Stores all configuration and data for a single guild."""
     __slots__ = ('role_id', 'command', 'key_filter', 'key_store', 
-                 'cooldowns', 'success_msgs', 'stats', 'custom_cooldown', 
+                 'success_msgs', 'stats', 'custom_cooldown', 
                  'filter_path', 'announcement_channel_id')
     
     def __init__(self, role_id: int, guild_id: int):
         self.role_id = role_id
         self.command = "claim"
         self.filter_path = f'bloom_filters/filter_{guild_id}.bloom'
-        self.announcement_channel_id: Optional[int] = None # ID for the announcement channel
+        self.announcement_channel_id: Optional[int] = None
         self.key_filter = ScalableBloomFilter(mode=ScalableBloomFilter.LARGE_SET_GROWTH)
         self.key_store = set()
-        self.cooldowns = dict()
         self.success_msgs = DRAMATIC_MESSAGES.copy()
         self.stats = {
             'keys_added': 0,
@@ -118,8 +117,8 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
         max_length=100
     )
     command_name_input = discord.ui.TextInput(
-        label="🔮 Command Name",
-        placeholder="e.g., claim, verify (no slash)",
+        label="🔮 Command Name (letters, numbers, -)",
+        placeholder="e.g., claim, verify-role (no slash)",
         default="claim",
         min_length=1,
         max_length=32
@@ -129,6 +128,13 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
         placeholder="Enter channel name for success messages, or leave blank",
         required=False,
         max_length=100
+    )
+    cooldown_input = discord.ui.TextInput(
+        label="⏱️ Cooldown (in seconds)",
+        placeholder="e.g., 300 for 5 minutes",
+        default="300",
+        min_length=1,
+        max_length=7
     )
     initial_keys_input = discord.ui.TextInput(
         label="📜 Initial Keys (Only adds new keys)",
@@ -142,12 +148,12 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
         super().__init__()
         
         if current_config:
-            # Pre-fill the modal with existing settings if they exist
             role = guild.get_role(current_config.role_id)
             if role:
                 self.role_name_input.default = role.name
             
             self.command_name_input.default = current_config.command
+            self.cooldown_input.default = str(current_config.custom_cooldown)
 
             if current_config.announcement_channel_id:
                 channel = guild.get_channel(current_config.announcement_channel_id)
@@ -165,15 +171,28 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 await interaction.followup.send(f"❌ Role '{role_name}' not found!", ephemeral=True)
                 return
             
+            # --- Command Name Sanitization ---
             command_name = self.command_name_input.value.strip().lower()
+            if not re.match(r'^[a-z0-9-]{1,32}$', command_name):
+                await interaction.followup.send("❌ Invalid command name. Please use only lowercase letters, numbers, and hyphens.", ephemeral=True)
+                return
             
+            # --- Cooldown Validation ---
+            try:
+                cooldown_seconds = int(self.cooldown_input.value.strip())
+                if cooldown_seconds < 0:
+                    raise ValueError
+            except ValueError:
+                await interaction.followup.send("❌ Invalid cooldown. Please enter a positive number of seconds.", ephemeral=True)
+                return
+
             # Channel Processing
             channel_name = self.announcement_channel_input.value.strip()
             announcement_channel = None
             if channel_name:
                 announcement_channel = discord.utils.get(interaction.guild.text_channels, name=channel_name)
                 if not announcement_channel:
-                    await interaction.followup.send(f"❌ Text channel '{channel_name}' not found! Please enter the exact name (case-sensitive).", ephemeral=True)
+                    await interaction.followup.send(f"❌ Text channel '{channel_name}' not found!", ephemeral=True)
                     return
 
             guild_id = interaction.guild.id
@@ -194,7 +213,8 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
             
             cfg = bot.config[guild_id]
             cfg.command = command_name
-            cfg.role_id = role.id # Update role ID in case it changed
+            cfg.role_id = role.id
+            cfg.custom_cooldown = cooldown_seconds
             if announcement_channel:
                 cfg.announcement_channel_id = announcement_channel.id
             else:
@@ -501,6 +521,18 @@ class AdminCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# --- Dynamic Cooldown Logic ---
+async def dynamic_cooldown(interaction: discord.Interaction) -> Optional[app_commands.Cooldown]:
+    """Applies a dynamic cooldown unless the user is an admin."""
+    if interaction.user.guild_permissions.administrator:
+        return None # No cooldown for admins
+    
+    bot = interaction.client
+    cfg = bot.config.get(interaction.guild_id)
+    if cfg:
+        return app_commands.Cooldown(1, float(cfg.custom_cooldown))
+    return None # No config, no cooldown
+
 # --- Dynamic Claim Cog ---
 class ClaimCog(commands.Cog):
     """A cog created dynamically for each guild's claim command."""
@@ -509,12 +541,26 @@ class ClaimCog(commands.Cog):
         self._claim_command = app_commands.Command(
             name=command_name,
             description="✨ Claim your role with a mystical key",
-            callback=self.claim_callback
+            callback=self.claim_callback,
         )
+        # Apply the dynamic cooldown check to the command
+        self._claim_command.add_check(dynamic_cooldown)
 
     async def claim_callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ArcaneGatewayModal())
     
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Handles errors for the claim command, specifically cooldowns."""
+        if isinstance(error, app_commands.CommandOnCooldown):
+            minutes, seconds = divmod(int(error.retry_after), 60)
+            await interaction.response.send_message(
+                f"⌛ The arcane energies must replenish... Return in {minutes}m {seconds}s.",
+                ephemeral=True
+            )
+        else:
+            logging.error(f"Unhandled error in ClaimCog: {error}", exc_info=True)
+            await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+
     def cog_load(self):
         self.bot.tree.add_command(self._claim_command, guild=self.guild)
 
@@ -677,19 +723,10 @@ class RealmKeeper(commands.Bot):
             await interaction.followup.send("⚠️ My role must be higher than the role I'm trying to grant!", ephemeral=True)
             return
 
-        if not interaction.user.guild_permissions.administrator:
-            last_try = cfg.cooldowns.get(interaction.user.id, 0)
-            if time.time() - last_try < cfg.custom_cooldown:
-                remaining = int(cfg.custom_cooldown - (time.time() - last_try))
-                minutes, seconds = divmod(remaining, 60)
-                await interaction.followup.send(f"⌛ The arcane energies must replenish... Return in {minutes}m {seconds}s.", ephemeral=True)
-                return
-
         try:
             key_normalized = str(uuid.UUID(key.strip())).lower()
         except ValueError:
             cfg.stats['failed_claims'] += 1
-            cfg.cooldowns[interaction.user.id] = time.time()
             await interaction.followup.send("❌ Invalid key format! Keys must be in UUID format.", ephemeral=True)
             return
 
@@ -729,7 +766,6 @@ class RealmKeeper(commands.Bot):
                     await interaction.followup.send("💔 The ritual of bestowal has failed unexpectedly. Your key has not been consumed.", ephemeral=True)
             else:
                 cfg.stats['failed_claims'] += 1
-                cfg.cooldowns[interaction.user.id] = time.time()
                 await interaction.followup.send("🌑 This key holds no power in these lands...", ephemeral=True)
 
 if __name__ == "__main__":
