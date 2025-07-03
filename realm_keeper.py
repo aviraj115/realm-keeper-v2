@@ -531,7 +531,9 @@ async def dynamic_cooldown(interaction: discord.Interaction) -> Optional[app_com
     cfg = bot.config.get(interaction.guild_id)
     if cfg:
         return app_commands.Cooldown(1, float(cfg.custom_cooldown))
-    return None # No config, no cooldown
+    # If there is no config for the guild, do not apply a cooldown.
+    # This allows the command to proceed to the logic that tells the user to run /setup.
+    return None
 
 # --- Dynamic Claim Cog ---
 class ClaimCog(commands.Cog):
@@ -547,6 +549,10 @@ class ClaimCog(commands.Cog):
         self._claim_command.add_check(dynamic_cooldown)
 
     async def claim_callback(self, interaction: discord.Interaction):
+        # First, check if the bot is configured for this guild.
+        if interaction.guild_id not in self.bot.config:
+            await interaction.response.send_message("🌌 The mystical gateway has not yet been established in this realm! An admin must run `/setup`.", ephemeral=True)
+            return
         await interaction.response.send_modal(ArcaneGatewayModal())
     
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -557,9 +563,15 @@ class ClaimCog(commands.Cog):
                 f"⌛ The arcane energies must replenish... Return in {minutes}m {seconds}s.",
                 ephemeral=True
             )
+        elif isinstance(error, app_commands.CheckFailure):
+            # This can happen if a command from a previous bot run is cached by Discord
+            # but the bot is no longer configured for it.
+            logging.warning(f"CheckFailure for user {interaction.user.id} in guild {interaction.guild.id}. This is likely a stale command.")
+            await interaction.response.send_message("This command seems to be inactive. An admin may need to run `/setup`.", ephemeral=True)
         else:
             logging.error(f"Unhandled error in ClaimCog: {error}", exc_info=True)
-            await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("An unexpected error occurred.", ephemeral=True)
 
     def cog_load(self):
         self.bot.tree.add_command(self._claim_command, guild=self.guild)
@@ -694,6 +706,8 @@ class RealmKeeper(commands.Bot):
 
         claim_cog = ClaimCog(self, command_name)
         claim_cog.guild = guild
+        # Manually set the cog's unique name before adding it
+        claim_cog.__cog_name__ = cog_name
         await self.add_cog(claim_cog, guilds=[guild])
         logging.info(f"Registered command `/{command_name}` for guild {guild.name} ({guild.id})")
         
@@ -706,6 +720,8 @@ class RealmKeeper(commands.Bot):
         guild_id = interaction.guild.id
         cfg = self.config.get(guild_id)
         
+        # This check is now redundant because the claim_callback handles it,
+        # but it's good practice to keep it as a fallback.
         if not cfg:
             await interaction.followup.send("🌌 The mystical gateway has not yet been established in this realm! An admin must run `/setup`.", ephemeral=True)
             return
