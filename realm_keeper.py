@@ -171,11 +171,13 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 await interaction.followup.send(f"❌ Role '{role_name}' not found!", ephemeral=True)
                 return
             
+            # --- Command Name Sanitization ---
             command_name = self.command_name_input.value.strip().lower()
             if not re.match(r'^[a-z0-9-]{1,32}$', command_name):
                 await interaction.followup.send("❌ Invalid command name. Please use only lowercase letters, numbers, and hyphens.", ephemeral=True)
                 return
             
+            # --- Cooldown Validation ---
             try:
                 cooldown_seconds = int(self.cooldown_input.value.strip())
                 if cooldown_seconds < 0:
@@ -184,6 +186,7 @@ class SetupModal(discord.ui.Modal, title="🏰 Realm Setup"):
                 await interaction.followup.send("❌ Invalid cooldown. Please enter a positive number of seconds.", ephemeral=True)
                 return
 
+            # Channel Processing
             channel_name = self.announcement_channel_input.value.strip()
             announcement_channel = None
             if channel_name:
@@ -359,15 +362,6 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("🛡️ You must be a server administrator to use this command.", ephemeral=True)
             return False
         return True
-    
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.command.name == 'setup':
-            return True
-        
-        if interaction.guild_id not in self.bot.config:
-            await interaction.response.send_message("❌ Run `/setup` first to configure the bot for this server.", ephemeral=True)
-            return False
-        return True
 
     @app_commands.command(name="setup", description="🏰 Initialize or reconfigure the bot for this server.")
     @app_commands.default_permissions(administrator=True)
@@ -381,11 +375,17 @@ class AdminCog(commands.Cog):
     @app_commands.command(name="addkeys", description="📚 Add multiple keys to the store via a modal.")
     @app_commands.default_permissions(administrator=True)
     async def addkeys(self, interaction: discord.Interaction):
+        if interaction.guild_id not in interaction.client.config:
+            await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+            return
         await interaction.response.send_modal(BulkKeyModal())
 
     @app_commands.command(name="removekeys", description="🗑️ Remove multiple keys from the store via a modal.")
     @app_commands.default_permissions(administrator=True)
     async def removekeys(self, interaction: discord.Interaction):
+        if interaction.guild_id not in interaction.client.config:
+            await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+            return
         await interaction.response.send_modal(RemoveKeysModal())
 
     @app_commands.command(name="loadkeys", description="📤 Load keys from a text file.")
@@ -399,6 +399,18 @@ class AdminCog(commands.Cog):
         guild_id = interaction.guild.id
         bot = interaction.client
         cfg = bot.config.get(guild_id)
+        
+        if not cfg:
+            await interaction.followup.send("❌ Run `/setup` first!", ephemeral=True)
+            return
+
+        if not file.filename.endswith('.txt'):
+            await interaction.followup.send("📄 Invalid file type! Please upload a `.txt` file.", ephemeral=True)
+            return
+
+        if file.size > 5 * 1024 * 1024:
+            await interaction.followup.send("⚖️ File is too large (max 5MB).", ephemeral=True)
+            return
         
         try:
             content = await file.read()
@@ -436,12 +448,19 @@ class AdminCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def customize(self, interaction: discord.Interaction):
         cfg = interaction.client.config.get(interaction.guild_id)
+        if not cfg:
+            await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+            return
         await interaction.response.send_modal(CustomizeModal(cfg.success_msgs))
 
     @app_commands.command(name="clearkeys", description="🗑️ Remove ALL available keys from the store.")
     @app_commands.default_permissions(administrator=True)
     async def clearkeys(self, interaction: discord.Interaction):
         cfg = interaction.client.config.get(interaction.guild_id)
+        if not cfg:
+            await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+            return
+
         await interaction.response.defer(ephemeral=True)
         
         async with self.bot.locks[interaction.guild_id]:
@@ -458,6 +477,10 @@ class AdminCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def stats(self, interaction: discord.Interaction):
         cfg = interaction.client.config.get(interaction.guild_id)
+        if not cfg:
+            await interaction.response.send_message("❌ Run `/setup` first!", ephemeral=True)
+            return
+
         role = interaction.guild.get_role(cfg.role_id)
         
         embed = discord.Embed(
@@ -500,17 +523,21 @@ class AdminCog(commands.Cog):
 
 # --- Dynamic Cooldown Logic ---
 async def dynamic_cooldown(interaction: discord.Interaction) -> Optional[app_commands.Cooldown]:
+    """Applies a dynamic cooldown unless the user is an admin."""
     if interaction.user.guild_permissions.administrator:
-        return None
+        return None # No cooldown for admins
     
     bot = interaction.client
     cfg = bot.config.get(interaction.guild_id)
     if cfg:
         return app_commands.Cooldown(1, float(cfg.custom_cooldown))
+    # If there is no config for the guild, do not apply a cooldown.
+    # This allows the command to proceed to the logic that tells the user to run /setup.
     return None
 
 # --- Dynamic Claim Cog ---
 class ClaimCog(commands.Cog):
+    """A cog created dynamically for each guild's claim command."""
     def __init__(self, bot: "RealmKeeper", command_name: str):
         self.bot = bot
         self._claim_command = app_commands.Command(
@@ -518,19 +545,18 @@ class ClaimCog(commands.Cog):
             description="✨ Claim your role with a mystical key",
             callback=self.claim_callback,
         )
-        # --- THE FIX ---
-        # Explicitly set default_permissions to an empty Permissions object.
-        # This tells Discord that no special permissions are required, overriding any faulty cache.
-        self._claim_command.default_permissions = discord.Permissions()
+        # Apply the dynamic cooldown check to the command
         self._claim_command.add_check(dynamic_cooldown)
 
     async def claim_callback(self, interaction: discord.Interaction):
+        # First, check if the bot is configured for this guild.
         if interaction.guild_id not in self.bot.config:
             await interaction.response.send_message("🌌 The mystical gateway has not yet been established in this realm! An admin must run `/setup`.", ephemeral=True)
             return
         await interaction.response.send_modal(ArcaneGatewayModal())
     
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Handles errors for the claim command, specifically cooldowns."""
         if isinstance(error, app_commands.CommandOnCooldown):
             minutes, seconds = divmod(int(error.retry_after), 60)
             await interaction.response.send_message(
@@ -538,6 +564,8 @@ class ClaimCog(commands.Cog):
                 ephemeral=True
             )
         elif isinstance(error, app_commands.CheckFailure):
+            # This can happen if a command from a previous bot run is cached by Discord
+            # but the bot is no longer configured for it.
             logging.warning(f"CheckFailure for user {interaction.user.id} in guild {interaction.guild.id}. This is likely a stale command.")
             await interaction.response.send_message("This command seems to be inactive. An admin may need to run `/setup`.", ephemeral=True)
         else:
@@ -576,7 +604,7 @@ class RealmKeeper(commands.Bot):
                 if guild.id in self.config:
                     cfg = self.config[guild.id]
                     if cfg.command:
-                        await self.register_guild_commands(guild, cfg.command, sync=False)
+                        await self.register_guild_commands(guild, cfg.command)
 
             await self.tree.sync()
             logging.info("✅ Global and guild commands synced.")
@@ -587,28 +615,17 @@ class RealmKeeper(commands.Bot):
         except Exception as e:
             logging.error(f"Ready event error: {e}", exc_info=True)
 
-    async def on_guild_join(self, guild: discord.Guild):
-        """When the bot joins a new guild, it doesn't have a config yet."""
-        logging.info(f"Joined new guild: {guild.name} ({guild.id}). No commands registered until /setup is run.")
-
     async def on_guild_remove(self, guild: discord.Guild):
-        """Cleans up config and commands when the bot is removed from a guild."""
         if guild.id in self.config:
             async with self.locks['global']:
                 del self.config[guild.id]
                 await self.save_config()
             logging.info(f"Removed configuration for guild {guild.id} as I was removed.")
-        
-        self.tree.clear_commands(guild=guild)
-        await self.tree.sync(guild=guild)
-        logging.info(f"Cleared commands for removed guild: {guild.name} ({guild.id})")
-
 
     async def periodic_save(self):
         await self.wait_until_ready()
         while not self.is_closed():
-            save_interval = int(os.getenv('SAVE_INTERVAL', '300'))
-            await asyncio.sleep(save_interval)
+            await asyncio.sleep(300)
             logging.info("Initiating periodic configuration save...")
             async with self.locks['global']:
                 await self.save_config()
@@ -675,9 +692,10 @@ class RealmKeeper(commands.Bot):
             except Exception as e:
                 logging.error(f"Could not save bloom filter for guild {gid}: {e}")
 
-    async def register_guild_commands(self, guild: discord.Guild, command_name: str, sync: bool = True):
+    async def register_guild_commands(self, guild: discord.Guild, command_name: str):
         """
         Registers or updates the dynamic claim command for a single guild.
+        This function ensures one cog per guild for its dynamic command.
         """
         cog_name = f"ClaimCog_{guild.id}"
         existing_cog = self.get_cog(cog_name)
@@ -688,13 +706,13 @@ class RealmKeeper(commands.Bot):
 
         claim_cog = ClaimCog(self, command_name)
         claim_cog.guild = guild
+        # Manually set the cog's unique name before adding it
         claim_cog.__cog_name__ = cog_name
         await self.add_cog(claim_cog, guilds=[guild])
-        logging.info(f"Prepared command `/{command_name}` for guild {guild.name} ({guild.id})")
+        logging.info(f"Registered command `/{command_name}` for guild {guild.name} ({guild.id})")
         
-        if sync:
-            await self.tree.sync(guild=guild)
-            logging.info(f"Synced commands for guild {guild.id} after command update.")
+        await self.tree.sync(guild=guild)
+        logging.info(f"Synced commands for guild {guild.id} after command update.")
 
 
     async def process_claim(self, interaction: discord.Interaction, key: str):
@@ -702,6 +720,8 @@ class RealmKeeper(commands.Bot):
         guild_id = interaction.guild.id
         cfg = self.config.get(guild_id)
         
+        # This check is now redundant because the claim_callback handles it,
+        # but it's good practice to keep it as a fallback.
         if not cfg:
             await interaction.followup.send("🌌 The mystical gateway has not yet been established in this realm! An admin must run `/setup`.", ephemeral=True)
             return
