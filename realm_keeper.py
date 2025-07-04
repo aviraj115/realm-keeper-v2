@@ -360,13 +360,10 @@ class AdminCog(commands.Cog):
             return False
         return True
     
-    # This check will now apply to all commands in this Cog
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # The /setup command is exempt from this check, as it's the entry point.
         if interaction.command.name == 'setup':
             return True
         
-        # For all other admin commands, ensure setup has been run.
         if interaction.guild_id not in self.bot.config:
             await interaction.response.send_message("❌ Run `/setup` first to configure the bot for this server.", ephemeral=True)
             return False
@@ -503,7 +500,6 @@ class AdminCog(commands.Cog):
 
 # --- Dynamic Cooldown Logic ---
 async def dynamic_cooldown(interaction: discord.Interaction) -> Optional[app_commands.Cooldown]:
-    """Applies a dynamic cooldown unless the user is an admin."""
     if interaction.user.guild_permissions.administrator:
         return None
     
@@ -515,7 +511,6 @@ async def dynamic_cooldown(interaction: discord.Interaction) -> Optional[app_com
 
 # --- Dynamic Claim Cog ---
 class ClaimCog(commands.Cog):
-    """A cog created dynamically for each guild's claim command."""
     def __init__(self, bot: "RealmKeeper", command_name: str):
         self.bot = bot
         self._claim_command = app_commands.Command(
@@ -532,7 +527,6 @@ class ClaimCog(commands.Cog):
         await interaction.response.send_modal(ArcaneGatewayModal())
     
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        """Handles errors for the claim command, specifically cooldowns."""
         if isinstance(error, app_commands.CommandOnCooldown):
             minutes, seconds = divmod(int(error.retry_after), 60)
             await interaction.response.send_message(
@@ -574,12 +568,15 @@ class RealmKeeper(commands.Bot):
 
     async def on_ready(self):
         try:
+            # First, register all guild-specific commands without syncing yet.
             for guild in self.guilds:
                 if guild.id in self.config:
                     cfg = self.config[guild.id]
                     if cfg.command:
-                        await self.register_guild_commands(guild, cfg.command)
+                        # This just adds the cog to the bot's internal state
+                        await self.register_guild_commands(guild, cfg.command, sync=False)
 
+            # Then, perform a single global sync to push all commands at once.
             await self.tree.sync()
             logging.info("✅ Global and guild commands synced.")
 
@@ -589,12 +586,23 @@ class RealmKeeper(commands.Bot):
         except Exception as e:
             logging.error(f"Ready event error: {e}", exc_info=True)
 
+    async def on_guild_join(self, guild: discord.Guild):
+        """When the bot joins a new guild, it doesn't have a config yet."""
+        logging.info(f"Joined new guild: {guild.name} ({guild.id}). No commands registered until /setup is run.")
+
     async def on_guild_remove(self, guild: discord.Guild):
+        """Cleans up config and commands when the bot is removed from a guild."""
         if guild.id in self.config:
             async with self.locks['global']:
                 del self.config[guild.id]
                 await self.save_config()
             logging.info(f"Removed configuration for guild {guild.id} as I was removed.")
+        
+        # Clear any commands specific to that guild
+        self.tree.clear_commands(guild=guild)
+        await self.tree.sync(guild=guild)
+        logging.info(f"Cleared commands for removed guild: {guild.name} ({guild.id})")
+
 
     async def periodic_save(self):
         await self.wait_until_ready()
@@ -667,10 +675,9 @@ class RealmKeeper(commands.Bot):
             except Exception as e:
                 logging.error(f"Could not save bloom filter for guild {gid}: {e}")
 
-    async def register_guild_commands(self, guild: discord.Guild, command_name: str):
+    async def register_guild_commands(self, guild: discord.Guild, command_name: str, sync: bool = True):
         """
         Registers or updates the dynamic claim command for a single guild.
-        This function ensures one cog per guild for its dynamic command.
         """
         cog_name = f"ClaimCog_{guild.id}"
         existing_cog = self.get_cog(cog_name)
@@ -683,10 +690,11 @@ class RealmKeeper(commands.Bot):
         claim_cog.guild = guild
         claim_cog.__cog_name__ = cog_name
         await self.add_cog(claim_cog, guilds=[guild])
-        logging.info(f"Registered command `/{command_name}` for guild {guild.name} ({guild.id})")
+        logging.info(f"Prepared command `/{command_name}` for guild {guild.name} ({guild.id})")
         
-        await self.tree.sync(guild=guild)
-        logging.info(f"Synced commands for guild {guild.id} after command update.")
+        if sync:
+            await self.tree.sync(guild=guild)
+            logging.info(f"Synced commands for guild {guild.id} after command update.")
 
 
     async def process_claim(self, interaction: discord.Interaction, key: str):
