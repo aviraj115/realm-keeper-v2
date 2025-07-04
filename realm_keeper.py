@@ -518,6 +518,10 @@ class ClaimCog(commands.Cog):
             description="✨ Claim your role with a mystical key",
             callback=self.claim_callback,
         )
+        # --- THE FIX ---
+        # Explicitly set default_permissions to an empty Permissions object.
+        # This tells Discord that no special permissions are required, overriding any faulty cache.
+        self._claim_command.default_permissions = discord.Permissions()
         self._claim_command.add_check(dynamic_cooldown)
 
     async def claim_callback(self, interaction: discord.Interaction):
@@ -568,15 +572,12 @@ class RealmKeeper(commands.Bot):
 
     async def on_ready(self):
         try:
-            # First, register all guild-specific commands without syncing yet.
             for guild in self.guilds:
                 if guild.id in self.config:
                     cfg = self.config[guild.id]
                     if cfg.command:
-                        # This just adds the cog to the bot's internal state
                         await self.register_guild_commands(guild, cfg.command, sync=False)
 
-            # Then, perform a single global sync to push all commands at once.
             await self.tree.sync()
             logging.info("✅ Global and guild commands synced.")
 
@@ -598,7 +599,6 @@ class RealmKeeper(commands.Bot):
                 await self.save_config()
             logging.info(f"Removed configuration for guild {guild.id} as I was removed.")
         
-        # Clear any commands specific to that guild
         self.tree.clear_commands(guild=guild)
         await self.tree.sync(guild=guild)
         logging.info(f"Cleared commands for removed guild: {guild.name} ({guild.id})")
